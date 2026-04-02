@@ -37,12 +37,11 @@ import { getAgentWorkspacePath, getAgentSessionWorkspacePath, getSdkConfigDir, g
 import { getWorkspaceAttachedDirectories } from './agent-workspace-manager'
 import { getRuntimeStatus } from './runtime-init'
 import { getSettings } from './settings-service'
-import { getAgentPromptAppend } from './system-prompt-manager'
 import { buildSystemPrompt, buildDynamicContext, buildBuiltinAgents } from './agent-prompt-builder'
 import { permissionService } from './agent-permission-service'
 import type { PermissionResult, CanUseToolOptions } from './agent-permission-service'
 import { askUserService } from './agent-ask-user-service'
-import { exitPlanService } from './agent-exit-plan-service'
+import { exitPlanService, type ExitPlanPermissionResult } from './agent-exit-plan-service'
 import { getMemoryConfig } from './memory-service'
 import { searchMemory, addMemory, formatSearchResult } from './memos-client'
 import {
@@ -153,6 +152,17 @@ function isAutoRetryableCatchError(
     if (rawErrorMessage.includes('context_management')) return true
   }
   return false
+}
+
+/**
+ * 判断错误是否为 SDK session 不存在（"No conversation found with session ID"）
+ *
+ * 当 resume 目标 session 已过期或被清理时，SDK 会抛出此错误。
+ * 此类错误可通过清除 sdkSessionId 并切换到上下文回填模式来恢复。
+ */
+function isSessionNotFoundError(errorMessage: string, stderr?: string): boolean {
+  const pattern = /No conversation found.*with session/i
+  return pattern.test(errorMessage) || (!!stderr && pattern.test(stderr))
 }
 
 /** 最大自动重试次数 */
@@ -326,7 +336,7 @@ function extractSDKToolSummary(content: Array<{ type: string; name?: string; inp
  * 当 resume 不可用时，将最近消息拼接为上下文注入 prompt，
  * 让新 SDK 会话保留对话记忆。包含文本内容和工具活动摘要。
  */
-function buildContextPrompt(sessionId: string, currentUserMessage: string): string {
+function buildContextPrompt(sessionId: string, currentUserMessage: string, sessionHint?: { agentCwd: string }): string {
   const allMessages = getAgentSessionSDKMessages(sessionId)
   if (allMessages.length === 0) return currentUserMessage
 
@@ -362,38 +372,20 @@ function buildContextPrompt(sessionId: string, currentUserMessage: string): stri
 
   if (lines.length === 0) return currentUserMessage
 
-  console.log(`[Agent 编排] buildContextPrompt: 读取 ${allMessages.length} 条消息，注入 ${lines.length} 条历史`)
-  return `<conversation_history>\n${lines.join('\n')}\n</conversation_history>\n\n${currentUserMessage}`
+  // 注入 session 元信息，便于 Agent 在需要时读取完整历史
+  const sessionInfoBlock = sessionHint
+    ? `\n<session_info>\nSession ID: ${sessionId}\nSession CWD: ${sessionHint.agentCwd}\nNote: 上方为近期对话摘要。如需更多上下文，可读取 ~/.proma/agent-sessions/${sessionId}.jsonl 获取完整历史。\n</session_info>\n`
+    : ''
+
+  console.log(`[Agent 编排] buildContextPrompt: 读取 ${allMessages.length} 条消息，注入 ${lines.length} 条历史${sessionHint ? '（含 session 元信息）' : ''}`)
+  return `<conversation_history>${sessionInfoBlock}\n${lines.join('\n')}\n</conversation_history>\n\n${currentUserMessage}`
 }
 
-/** 标题生成系统指令 */
-const TITLE_SYSTEM_PROMPT = '你是一个对话标题生成器。请根据用户的第一条消息生成一个简短的对话标题。要求：1. 10字以内；2. 只输出标题本身；3. 不要输出解释、编号、引号或其他标点；4. 如果消息过短或主题不明确，返回用户原话的核心短语。'
+/** 标题生成 Prompt */
+const TITLE_PROMPT = '根据用户的第一条消息，生成一个简短的对话标题（10字以内）。只输出标题，不要有任何其他内容、标点符号或引号。\n\n用户消息：'
 
 /** 标题最大长度 */
 const MAX_TITLE_LENGTH = 20
-
-function sanitizeGeneratedTitle(title: string, fallback: string): string | null {
-  const cleaned = title
-    .trim()
-    .replace(/^["'""''「《【]+|["'""''」》】]+$/g, '')
-    .replace(/^\d+\.\s*/g, '')
-    .trim()
-
-  if (!cleaned) return null
-
-  const invalidFragments = [
-    '不要有任何其他内容',
-    '只输出标题',
-    '标点符号',
-    '用户消息',
-    '10字以内',
-  ]
-  if (invalidFragments.some((fragment) => cleaned.includes(fragment))) {
-    return fallback
-  }
-
-  return cleaned.slice(0, MAX_TITLE_LENGTH) || null
-}
 
 /** 默认会话标题（用于判断是否需要自动生成） */
 const DEFAULT_SESSION_TITLE = '新 Agent 会话'
@@ -413,6 +405,9 @@ export class AgentOrchestrator {
 
   /** 被用户手动中止的会话集合（在 stop 中标记，catch block 中消费） */
   private stoppedBySessions = new Set<string>()
+
+  /** 运行中会话的当前权限模式（支持运行时动态切换） */
+  private sessionPermissionModes = new Map<string, PromaPermissionMode>()
 
   constructor(adapter: AgentProviderAdapter, eventBus: AgentEventBus) {
     this.adapter = adapter
@@ -610,6 +605,7 @@ export class AgentOrchestrator {
    */
   async generateTitle(input: AgentGenerateTitleInput): Promise<string | null> {
     const { userMessage, channelId, modelId } = input
+    console.log('[Agent 标题生成] 开始生成标题:', { channelId, modelId, userMessage: userMessage.slice(0, 50) })
 
     try {
       const channels = listChannels()
@@ -625,8 +621,8 @@ export class AgentOrchestrator {
         baseUrl: channel.baseUrl,
         apiKey,
         modelId,
-        systemPrompt: TITLE_SYSTEM_PROMPT,
-        userMessage: userMessage.trim(),
+        systemPrompt: TITLE_PROMPT,
+        userMessage,
       })
 
       const proxyUrl = await getEffectiveProxyUrl()
@@ -637,7 +633,11 @@ export class AgentOrchestrator {
         return null
       }
 
-      return sanitizeGeneratedTitle(title, userMessage.trim().slice(0, MAX_TITLE_LENGTH))
+      const cleaned = title.trim().replace(/^["'""''「《]+|["'""''」》]+$/g, '').trim()
+      const result = cleaned.slice(0, MAX_TITLE_LENGTH) || null
+
+      console.log(`[Agent 标题生成] 生成标题成功: "${result}"`)
+      return result
     } catch (error) {
       console.warn('[Agent 标题生成] 生成失败:', error)
       return null
@@ -672,9 +672,35 @@ export class AgentOrchestrator {
   }
 
   /**
+   * Session-not-found 恢复：清除失效的 sdkSessionId，切换到上下文回填模式
+   *
+   * 当 resume 的目标 session 已过期/被清理时，SDK 会抛出 "No conversation found" 错误。
+   * 此方法执行恢复的公共逻辑，调用方负责设置 existingSdkSessionId = undefined 和流程控制（break/continue）。
+   *
+   * @returns lastRetryableError 描述字符串
+   */
+  private prepareSessionNotFoundRecovery(
+    sessionId: string,
+    queryOptions: ClaudeAgentQueryOptions,
+    contextualMessage: string,
+    agentCwd: string,
+    accumulatedMessages: SDKMessage[],
+    queryStartedAt: number,
+  ): string {
+    console.log(`[Agent 编排] 检测到 session-not-found 错误，清除 sdkSessionId 并切换到上下文回填模式`)
+    try { updateAgentSessionMeta(sessionId, { sdkSessionId: undefined }) } catch { /* 忽略 */ }
+    queryOptions.resumeSessionId = undefined
+    queryOptions.prompt = buildContextPrompt(sessionId, contextualMessage, { agentCwd })
+    this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
+    accumulatedMessages.length = 0
+    return 'Session 已失效，切换到上下文回填模式'
+  }
+
+  /**
    * 持久化累积的 SDKMessage（Phase 4: 直接存储原始 SDKMessage）
    *
-   * 只持久化 assistant 和 user 类型的消息（跳过 system、tool_progress 等临时消息）。
+   * 只持久化 assistant、user、result 和 compact_boundary system 消息
+   * （跳过 tool_progress、compacting 等临时消息）。
    */
   private persistSDKMessages(
     sessionId: string,
@@ -685,6 +711,7 @@ export class AgentOrchestrator {
 
     const toPersist = accumulatedMessages.filter(
       (m) => m.type === 'assistant' || m.type === 'user' || m.type === 'result'
+        || (m.type === 'system' && (m as import('@proma/shared').SDKSystemMessage).subtype === 'compact_boundary')
     )
 
     if (toPersist.length === 0) return
@@ -817,6 +844,7 @@ export class AgentOrchestrator {
     // 7. 状态初始化
     const accumulatedMessages: SDKMessage[] = []
     let resolvedModel = modelId || DEFAULT_MODEL_ID
+    let titleGenerationStarted = false
     let agentExec: { type: 'node' | 'bun'; path: string } | undefined
     let agentCwd: string | undefined
     let workspaceSlug: string | undefined
@@ -942,7 +970,7 @@ export class AgentOrchestrator {
         ? '/compact'
         : existingSdkSessionId
           ? contextualMessage
-          : buildContextPrompt(sessionId, contextualMessage)
+          : buildContextPrompt(sessionId, contextualMessage, { agentCwd })
 
       if (existingSdkSessionId) {
         console.log(`[Agent 编排] 使用 resume 模式，SDK session ID: ${existingSdkSessionId}`)
@@ -952,14 +980,20 @@ export class AgentOrchestrator {
 
       // 12. 读取应用设置 + 获取权限模式
       const appSettings = getSettings()
-      const permissionMode: PromaPermissionMode = permissionModeOverride
+      const initialPermissionMode: PromaPermissionMode = permissionModeOverride
         ?? (workspaceSlug
           ? getWorkspacePermissionMode(workspaceSlug)
           : (appSettings.agentPermissionMode ?? 'acceptEdits'))
-      console.log(`[Agent 编排] 权限模式: ${permissionMode}${permissionModeOverride ? '（外部覆盖）' : ''}`)
+      // 注册到 Map，支持运行中动态切换
+      this.sessionPermissionModes.set(sessionId, initialPermissionMode)
+      console.log(`[Agent 编排] 权限模式: ${initialPermissionMode}${permissionModeOverride ? '（外部覆盖）' : ''}`)
 
-      // ExitPlanMode 拦截器：所有权限模式下统一走 UI 审批流程
-      const handleExitPlanMode = (toolInput: Record<string, unknown>, signal: AbortSignal): Promise<PermissionResult> => {
+      /** 读取当前会话的实时权限模式（支持运行中切换） */
+      const getPermissionMode = (): PromaPermissionMode =>
+        this.sessionPermissionModes.get(sessionId) ?? initialPermissionMode
+
+      // ExitPlanMode 拦截器：plan 模式下走 UI 审批流程
+      const handleExitPlanMode = (toolInput: Record<string, unknown>, signal: AbortSignal): Promise<ExitPlanPermissionResult> => {
         return exitPlanService.handleExitPlanMode(
           sessionId,
           toolInput,
@@ -970,45 +1004,100 @@ export class AgentOrchestrator {
         )
       }
 
-      // 构建基础 canUseTool 回调
-      const baseCanUseTool = permissionMode === 'acceptEdits'
-        ? permissionService.createCanUseTool(
-            sessionId,
-            (request: PermissionRequest) => {
-              this.eventBus.emit(sessionId, { kind: 'proma_event', event: { type: 'permission_request', request } })
-            },
-            (sid, toolInput, signal, sendAskUser) => askUserService.handleAskUserQuestion(sid, toolInput, signal, sendAskUser),
-            (request: AskUserRequest) => {
-              this.eventBus.emit(sessionId, { kind: 'proma_event', event: { type: 'ask_user_request', request } })
-            },
-          )
-        : permissionMode === 'plan'
-          ? async (_toolName: string, _input: Record<string, unknown>, _options: CanUseToolOptions): Promise<PermissionResult> => {
-              // Plan 模式：自动批准所有工具调用（ExitPlanMode 已在外层拦截）
-              return { behavior: 'allow' as const, updatedInput: _input }
-            }
-          : undefined
+      // 始终创建 acceptEdits 权限回调（运行中可能切换到 acceptEdits）
+      const acceptEditsCanUseTool = permissionService.createCanUseTool(
+        sessionId,
+        (request: PermissionRequest) => {
+          this.eventBus.emit(sessionId, { kind: 'proma_event', event: { type: 'permission_request', request } })
+        },
+        (sid, toolInput, signal, sendAskUser) => askUserService.handleAskUserQuestion(sid, toolInput, signal, sendAskUser),
+        (request: AskUserRequest) => {
+          this.eventBus.emit(sessionId, { kind: 'proma_event', event: { type: 'ask_user_request', request } })
+        },
+      )
 
-      // 包装 canUseTool：优先拦截 EnterPlanMode/ExitPlanMode，其余走基础逻辑
+      // Plan 模式下允许的只读工具（不包含 Write/Edit/Bash 等写操作）
+      const PLAN_MODE_ALLOWED_TOOLS = new Set([
+        'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
+        'Agent', 'TodoRead', 'TodoWrite', 'TaskOutput',
+        'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet',
+        'ListMcpResourcesTool', 'ReadMcpResourceTool',
+        'AskUserQuestion',
+      ])
+
+      /** Plan 模式是否已被 Agent 进入（初始 plan 模式时天然为 true，其他模式需 EnterPlanMode 触发） */
+      let planModeEntered = initialPermissionMode === 'plan'
+
+      // 动态 canUseTool：每次调用读取当前权限模式，支持运行中切换
       const canUseTool = async (toolName: string, input: Record<string, unknown>, options: CanUseToolOptions): Promise<PermissionResult> => {
-        // ExitPlanMode 统一走 UI 审批
-        if (toolName === 'ExitPlanMode') {
-          return handleExitPlanMode(input, options.signal)
-        }
-        // EnterPlanMode：通知渲染进程 Agent 已进入 Plan 模式，然后放行
-        if (toolName === 'EnterPlanMode') {
-          this.eventBus.emit(sessionId, { kind: 'proma_event', event: { type: 'enter_plan_mode', sessionId } })
-          if (baseCanUseTool) {
-            return baseCanUseTool(toolName, input, options)
-          }
+        const currentMode = getPermissionMode()
+
+        // ── EnterPlanMode / ExitPlanMode 处理 ──
+
+        // 完全自动模式：透明化（用户选择了完全信任 Agent）
+        if (currentMode === 'bypassPermissions' && (toolName === 'EnterPlanMode' || toolName === 'ExitPlanMode')) {
           return { behavior: 'allow' as const, updatedInput: input }
         }
-        // 有基础回调则委托
-        if (baseCanUseTool) {
-          return baseCanUseTool(toolName, input, options)
+
+        // ExitPlanMode：只有 Agent 确实进入过 Plan 模式才走审批，否则静默放行
+        if (toolName === 'ExitPlanMode') {
+          if (!planModeEntered) {
+            return { behavior: 'allow' as const, updatedInput: input }
+          }
+          const result = await handleExitPlanMode(input, options.signal)
+          if (result.behavior === 'allow' && 'targetMode' in result && result.targetMode) {
+            // 更新 Map，后续 canUseTool 调用使用新模式
+            this.sessionPermissionModes.set(sessionId, result.targetMode)
+            planModeEntered = false
+            // 同步通知 SDK 侧切换权限模式
+            if (this.adapter.setPermissionMode) {
+              this.adapter.setPermissionMode(sessionId, result.targetMode).catch((err: unknown) => {
+                console.warn(`[Agent 编排] SDK 权限模式切换失败:`, err)
+              })
+            }
+          }
+          return result
         }
-        // bypassPermissions 模式：自动批准
-        return { behavior: 'allow' as const, updatedInput: input }
+
+        // EnterPlanMode：标记进入状态，通知渲染进程
+        if (toolName === 'EnterPlanMode') {
+          planModeEntered = true
+          this.eventBus.emit(sessionId, { kind: 'proma_event', event: { type: 'enter_plan_mode', sessionId } })
+          return { behavior: 'allow' as const, updatedInput: input }
+        }
+
+        // ── 普通工具的权限分派 ──
+
+        switch (currentMode) {
+          case 'bypassPermissions':
+            return { behavior: 'allow' as const, updatedInput: input }
+
+          case 'plan': {
+            // Plan 模式：只允许只读工具 + Write 到 .context/plan/ 目录
+            if (PLAN_MODE_ALLOWED_TOOLS.has(toolName)) {
+              return { behavior: 'allow' as const, updatedInput: input }
+            }
+            // 允许 Write 到 .context/plan/ 目录（计划文件输出）
+            if (toolName === 'Write') {
+              const filePath = typeof input.file_path === 'string' ? input.file_path : ''
+              if (filePath.includes('.context/plan/')) {
+                return { behavior: 'allow' as const, updatedInput: input }
+              }
+            }
+            // MCP 工具（以 mcp__ 开头）允许调用（调研用）
+            if (toolName.startsWith('mcp__')) {
+              return { behavior: 'allow' as const, updatedInput: input }
+            }
+            // 其余工具拒绝
+            return { behavior: 'deny' as const, message: '计划模式下不允许执行写操作，请在计划审批通过后再执行' }
+          }
+
+          case 'acceptEdits':
+            return acceptEditsCanUseTool(toolName, input, options)
+
+          default:
+            return { behavior: 'allow' as const, updatedInput: input }
+        }
       }
 
       // 13. 构建 Adapter 查询选项
@@ -1025,12 +1114,12 @@ export class AgentOrchestrator {
         executableArgs,
         env: sdkEnv,
         ...(maxTurns != null && { maxTurns }),
-        sdkPermissionMode: permissionMode,
+        sdkPermissionMode: initialPermissionMode,
         // 始终为 true：Worker 子代理使用 SDK 内部 mailbox 通信，
         // 若不跳过权限检查会导致 Worker 阻塞超时并提前停止
         allowDangerouslySkipPermissions: true,
         canUseTool,
-        ...(permissionMode === 'acceptEdits' && { allowedTools: [...SAFE_TOOLS] }),
+        ...(initialPermissionMode === 'acceptEdits' && { allowedTools: [...SAFE_TOOLS] }),
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
@@ -1038,9 +1127,8 @@ export class AgentOrchestrator {
             workspaceName: workspace?.name,
             workspaceSlug,
             sessionId,
-            permissionMode,
+            permissionMode: initialPermissionMode,
             memoryEnabled: (() => { const mc = getMemoryConfig(); return mc.enabled && !!mc.apiKey })(),
-            customPromptAppend: getAgentPromptAppend(),
           }),
         },
         resumeSessionId: existingSdkSessionId,
@@ -1090,6 +1178,13 @@ export class AgentOrchestrator {
             } catch (err) {
               console.error(`[Agent 编排] 保存 SDK session_id 失败:`, err)
             }
+          }
+
+          // SDK 初始化完成后立即触发标题生成，使多会话并发时用户能快速区分
+          if (!titleGenerationStarted) {
+            titleGenerationStarted = true
+            this.autoGenerateTitle(sessionId, userMessage, channelId, resolvedModel, callbacks)
+              .catch((err) => console.error('[Agent 编排] 标题生成未捕获异常:', err))
           }
         },
         onModelResolved: (model: string) => {
@@ -1241,6 +1336,14 @@ export class AgentOrchestrator {
                 }
                 const typedError = mapSDKErrorToTypedError(errorCode, friendlyErrorMessage(detailedMessage), originalError)
 
+                // Session 不存在错误：清除 sdkSessionId，切换到上下文回填模式重试
+                if (isSessionNotFoundError(detailedMessage, originalError) && existingSdkSessionId && attempt <= MAX_AUTO_RETRIES) {
+                  existingSdkSessionId = undefined
+                  lastRetryableError = this.prepareSessionNotFoundRecovery(sessionId, queryOptions, contextualMessage, agentCwd, accumulatedMessages, queryStartedAt)
+                  shouldRetryFromError = true
+                  break
+                }
+
                 // 判断是否可自动重试
                 if (isAutoRetryableTypedError(typedError) && attempt <= MAX_AUTO_RETRIES) {
                   lastRetryableError = typedError.title
@@ -1298,6 +1401,7 @@ export class AgentOrchestrator {
             // 累积 assistant 和 user 消息用于持久化
             // - 跳过 replay 消息，避免 resume 时重复写入
             // - 对 user 消息，仅累积含 tool_result 的（初始用户消息已在步骤 5 手动持久化）
+            // - 对 system 消息，仅累积 compact_boundary（上下文压缩分界线需要持久化显示）
             if (msg.type === 'assistant' || msg.type === 'user' || msg.type === 'result') {
               const msgRecord = msg as Record<string, unknown>
               if (!msgRecord.isReplay) {
@@ -1311,6 +1415,11 @@ export class AgentOrchestrator {
                 } else {
                   accumulatedMessages.push(msg)
                 }
+              }
+            } else if (msg.type === 'system') {
+              const sysMsg = msg as import('@proma/shared').SDKSystemMessage
+              if (sysMsg.subtype === 'compact_boundary') {
+                accumulatedMessages.push(msg)
               }
             }
 
@@ -1439,6 +1548,8 @@ export class AgentOrchestrator {
                   const resumeMsgRecord = resumeMsg as Record<string, unknown>
                   if ((resumeMsg.type === 'assistant' || resumeMsg.type === 'user') && !resumeMsgRecord.isReplay) {
                     resumeMessages.push(resumeMsg)
+                  } else if (resumeMsg.type === 'system' && (resumeMsg as import('@proma/shared').SDKSystemMessage).subtype === 'compact_boundary') {
+                    resumeMessages.push(resumeMsg)
                   }
                   this.eventBus.emit(sessionId, { kind: 'sdk_message', message: resumeMsg })
                 }
@@ -1465,7 +1576,7 @@ export class AgentOrchestrator {
           }
 
           // Plan 模式：Agent 完成规划后注入"接受计划"建议
-          if (permissionMode === 'plan' && this.activeSessions.has(sessionId)) {
+          if (initialPermissionMode === 'plan' && planModeEntered && this.activeSessions.has(sessionId)) {
             this.eventBus.emit(sessionId, {
               kind: 'sdk_message',
               message: { type: 'prompt_suggestion', suggestion: '请执行该计划' } as unknown as SDKMessage,
@@ -1475,10 +1586,6 @@ export class AgentOrchestrator {
 
           // 发送完成信号
           callbacks.onComplete(getAgentSessionMessages(sessionId))
-
-          // 异步生成标题
-          this.autoGenerateTitle(sessionId, userMessage, channelId, resolvedModel, callbacks)
-            .catch((err) => console.error('[Agent 编排] 标题生成未捕获异常:', err))
 
           break  // 成功完成，退出重试循环
 
@@ -1507,6 +1614,14 @@ export class AgentOrchestrator {
           const stderrOutput = stderrChunks.join('').trim()
           const apiError = extractApiError(stderrOutput)
           const rawErrorMessage = error instanceof Error ? error.message : ''
+
+          // Session 不存在错误：清除 sdkSessionId，切换到上下文回填模式重试
+          if (isSessionNotFoundError(rawErrorMessage, stderrOutput) && existingSdkSessionId && attempt <= MAX_AUTO_RETRIES) {
+            existingSdkSessionId = undefined
+            lastRetryableError = this.prepareSessionNotFoundRecovery(sessionId, queryOptions, contextualMessage, agentCwd, accumulatedMessages, queryStartedAt)
+            stderrChunks.length = 0
+            continue  // 进入下一次 retry 循环
+          }
 
           // 判断是否可重试
           if (isAutoRetryableCatchError(apiError, rawErrorMessage) && attempt <= MAX_AUTO_RETRIES) {
@@ -1624,6 +1739,7 @@ export class AgentOrchestrator {
 
     } finally {
       this.activeSessions.delete(sessionId)
+      this.sessionPermissionModes.delete(sessionId)
       this.queuedMessageUuids.delete(sessionId)
       permissionService.clearSessionPending(sessionId)
       askUserService.clearSessionPending(sessionId)
@@ -1639,6 +1755,7 @@ export class AgentOrchestrator {
    */
   stop(sessionId: string): void {
     this.activeSessions.delete(sessionId)
+    this.sessionPermissionModes.delete(sessionId)
     this.stoppedBySessions.add(sessionId)
     this.queuedMessageUuids.delete(sessionId)
     this.adapter.abort(sessionId)
@@ -1650,12 +1767,29 @@ export class AgentOrchestrator {
     return this.activeSessions.has(sessionId)
   }
 
+  /**
+   * 运行中动态切换会话的权限模式
+   *
+   * 同时更新 Proma 侧（canUseTool 闭包读取的 Map）和 SDK 侧（query.setPermissionMode）。
+   * 典型场景：用户在 Agent 运行中通过 PermissionModeSelector 切换模式。
+   */
+  async updateSessionPermissionMode(sessionId: string, mode: PromaPermissionMode): Promise<void> {
+    if (!this.activeSessions.has(sessionId)) return
+    this.sessionPermissionModes.set(sessionId, mode)
+    // 同步通知 SDK 侧
+    if (this.adapter.setPermissionMode) {
+      await this.adapter.setPermissionMode(sessionId, mode)
+    }
+    console.log(`[Agent 编排] 运行中权限模式已切换: sessionId=${sessionId}, mode=${mode}`)
+  }
+
   /** 中止所有活跃的 Agent 会话（应用退出时调用） */
   stopAll(): void {
     if (this.activeSessions.size === 0) return
     console.log(`[Agent 编排] 正在中止所有活跃会话 (${this.activeSessions.size} 个)...`)
     this.adapter.dispose()
     this.activeSessions.clear()
+    this.sessionPermissionModes.clear()
     this.queuedMessageUuids.clear()
   }
 

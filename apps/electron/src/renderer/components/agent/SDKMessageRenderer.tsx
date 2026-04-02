@@ -28,6 +28,7 @@ import {
 } from '@/components/ai-elements/message'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { CopyButton } from '@/components/chat/CopyButton'
+import { Badge } from '@/components/ui/badge'
 import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
@@ -323,9 +324,18 @@ export interface AssistantTurnRendererProps {
   onFork?: (upToMessageUuid: string) => void
   /** 是否正在流式输出中（隐藏操作栏） */
   isStreaming?: boolean
+  /** 是否显示“已被用户中断”标识 */
+  stoppedByUser?: boolean
 }
 
-export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, isStreaming }: AssistantTurnRendererProps): React.ReactElement | null {
+export function AssistantTurnRenderer({
+  turn,
+  allMessages,
+  basePath,
+  onFork,
+  isStreaming,
+  stoppedByUser,
+}: AssistantTurnRendererProps): React.ReactElement | null {
   const channels = useAtomValue(channelsAtom)
   // 收集所有 assistant 消息的内容块，保留 parent_tool_use_id 关联
   interface EnrichedBlock {
@@ -526,7 +536,7 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, isS
           : undefined
         const hasActions = !!(textContent || (onFork && lastUuid))
         const hasDuration = durationMs != null
-        if (!hasDuration && !hasActions) return null
+        if (!hasDuration && !hasActions && !stoppedByUser) return null
         return (
           <MessageActions className="pl-[46px] mt-0.5 min-h-[28px] w-full justify-start animate-in fade-in duration-200">
             {hasDuration && <DurationBadge durationMs={durationMs!} usage={usage} />}
@@ -535,6 +545,11 @@ export function AssistantTurnRenderer({ turn, allMessages, basePath, onFork, isS
               <MessageAction tooltip="从此处分叉" onClick={() => onFork(lastUuid)}>
                 <Split className="size-3.5" />
               </MessageAction>
+            )}
+            {stoppedByUser && (
+              <Badge variant="outline" className="text-xs text-muted-foreground/70 border-muted-foreground/30 shrink-0">
+                已被用户中断
+              </Badge>
             )}
             {totalTokens != null && (
               <span className="ml-1 text-[15px] font-light text-foreground/50 tabular-nums select-none">
@@ -843,6 +858,8 @@ export interface MessageGroupRendererProps {
   onFork?: (upToMessageUuid: string) => void
   /** 是否正在流式输出中（隐藏操作栏） */
   isStreaming?: boolean
+  /** 是否显示“已被用户中断”标识 */
+  stoppedByUser?: boolean
   /** 离屏占位估算高度（用于 content-visibility intrinsic size） */
   estimatedHeight?: number
   /** 外层节点测量 ref（供虚拟化回填真实高度） */
@@ -918,7 +935,16 @@ export function getGroupPreview(group: MessageGroup): string {
   return texts.join(' ').slice(0, 200)
 }
 
-export function MessageGroupRenderer({ group, allMessages, basePath, onFork, isStreaming, estimatedHeight, measureRef }: MessageGroupRendererProps): React.ReactElement | null {
+export function MessageGroupRenderer({
+  group,
+  allMessages,
+  basePath,
+  onFork,
+  isStreaming,
+  stoppedByUser,
+  estimatedHeight,
+  measureRef,
+}: MessageGroupRendererProps): React.ReactElement | null {
   const groupId = getGroupId(group)
   const intrinsicStyle = estimatedHeight && estimatedHeight > 0
     ? { containIntrinsicSize: `auto ${Math.ceil(estimatedHeight)}px` }
@@ -948,6 +974,7 @@ export function MessageGroupRenderer({ group, allMessages, basePath, onFork, isS
         basePath={basePath}
         onFork={onFork}
         isStreaming={isStreaming}
+        stoppedByUser={stoppedByUser}
       />
     </div>
   )

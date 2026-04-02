@@ -249,14 +249,14 @@ export const workspaceCapabilitiesVersionAtom = atom(0)
 
 /** 工作区文件版本号 — 文件变化时自增，触发文件浏览器重新加载 */
 export const workspaceFilesVersionAtom = atom(0)
-/** 工作区新增文件版本号 — 仅新增文件/目录时自增，用于右侧文件面板自动展开 */
+/** 工作区新增文件版本号 — 新文件创建时自增，用于刷新“新增文件”分组 */
 export const workspaceNewFilesVersionAtom = atom(0)
 
 // ===== 侧面板 Atoms =====
 
 /** 侧面板是否打开（per-session Map） */
 export const agentSidePanelOpenMapAtom = atom<Map<string, boolean>>(new Map())
-/** 用户手动收起锁（per-session Map）— true 表示本会话内不再因新文件自动展开 */
+/** 用户手动折叠锁（per-session），防止自动逻辑在短时间内反向展开 */
 export const agentSidePanelManualCollapseLockMapAtom = atom<Map<string, boolean>>(new Map())
 
 /** 当前会话的工作路径 Map — sessionId → path */
@@ -264,8 +264,11 @@ export const agentSessionPathMapAtom = atom<Map<string, string>>(new Map())
 
 // ===== 权限系统 Atoms =====
 
-/** 当前工作区权限模式 */
-export const agentPermissionModeAtom = atom<PromaPermissionMode>('acceptEdits')
+/** 工作区默认权限模式（初始化和新会话使用） */
+export const agentDefaultPermissionModeAtom = atom<PromaPermissionMode>('acceptEdits')
+
+/** Per-session 权限模式 Map — sessionId → PromaPermissionMode */
+export const agentPermissionModeMapAtom = atom<Map<string, PromaPermissionMode>>(new Map())
 
 /** Agent 思考模式 */
 export const agentThinkingAtom = atom<ThinkingConfig | undefined>(undefined)
@@ -408,18 +411,10 @@ export function applyAgentEvent(
 ): AgentStreamState {
   switch (event.type) {
     case 'text_delta':
-      // 子代理/嵌套 tool use 的 partial 文本不应混入主回复气泡，
-      // 否则会在底部短暂出现，再在完整 assistant 消息落地时被替换掉。
-      if (event.parentToolUseId) {
-        return { ...prev, retrying: undefined }
-      }
       // 开始接收文本 - 清除重试状态（重试成功）
       return { ...prev, content: prev.content + event.text, retrying: undefined }
 
     case 'text_complete':
-      if (event.parentToolUseId) {
-        return prev
-      }
       // 用完整文本替换增量累积的文本（用于回放场景：只需 text_complete 即可重建文本状态）
       return { ...prev, content: event.text }
 
@@ -860,3 +855,8 @@ export const backgroundTasksAtomFamily = atomFamily((sessionId: string) =>
 
 /** 被用户手动打断的会话集合（仅当前 streaming 周期有效，reload 后清除） */
 export const stoppedByUserSessionsAtom = atom<Set<string>>(new Set<string>())
+
+// ===== 初始化就绪状态 =====
+
+/** AgentSettingsInitializer 是否已完成加载（渠道/工作区/设置全部就绪） */
+export const agentSettingsReadyAtom = atom(false)

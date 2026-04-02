@@ -52,9 +52,10 @@ export function ScrollPositionManager({ id, ready }: { id: string; ready: boolea
   const prevIdRef = useRef(id)
 
   // 持续保存滚动位置（距底部距离）
+  // 仅在恢复完成后注册监听，避免初始化阶段的自动滚动污染缓存。
   useEffect(() => {
     const el = scrollRef.current
-    if (!el) return
+    if (!el || !restoredRef.current) return
 
     const savePosition = (): void => {
       const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
@@ -63,7 +64,7 @@ export function ScrollPositionManager({ id, ready }: { id: string; ready: boolea
 
     el.addEventListener('scroll', savePosition, { passive: true })
     return () => el.removeEventListener('scroll', savePosition)
-  }, [scrollRef, id])
+  }, [scrollRef, id, ready])
 
   // id 变化时重置恢复标记
   useEffect(() => {
@@ -87,6 +88,11 @@ export function ScrollPositionManager({ id, ready }: { id: string; ready: boolea
       stopScroll()
       const targetScrollTop = el.scrollHeight - el.clientHeight - savedDistance
       el.scrollTop = Math.max(0, targetScrollTop)
+      // 巩固一次，降低 ResizeObserver 竞争导致的回跳。
+      requestAnimationFrame(() => {
+        const t = el.scrollHeight - el.clientHeight - savedDistance
+        el.scrollTop = Math.max(0, t)
+      })
     } else {
       // 无保存位置或在底部：直接跳到底部（无动画）
       scrollToBottom('instant')

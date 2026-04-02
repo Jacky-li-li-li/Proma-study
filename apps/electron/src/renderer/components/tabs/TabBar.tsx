@@ -29,11 +29,14 @@ import {
   conversationContextLengthAtom,
   conversationThinkingEnabledAtom,
   conversationParallelModeAtom,
+  currentConversationIdAtom,
 } from '@/atoms/chat-atoms'
 import {
+  agentSessionsAtom,
   agentSidePanelOpenMapAtom,
   agentSidePanelManualCollapseLockMapAtom,
   currentAgentSessionIdAtom,
+  currentAgentWorkspaceIdAtom,
 } from '@/atoms/agent-atoms'
 import { conversationPromptIdAtom } from '@/atoms/system-prompt-atoms'
 import { TabBarItem } from './TabBarItem'
@@ -60,6 +63,11 @@ export function TabBar(): React.ReactElement {
   const setConvContextLength = useSetAtom(conversationContextLengthAtom)
   const setConvThinking = useSetAtom(conversationThinkingEnabledAtom)
   const setConvParallel = useSetAtom(conversationParallelModeAtom)
+  const setAppMode = useSetAtom(appModeAtom)
+  const setCurrentConversationId = useSetAtom(currentConversationIdAtom)
+  const setCurrentAgentSessionId = useSetAtom(currentAgentSessionIdAtom)
+  const setCurrentAgentWorkspaceId = useSetAtom(currentAgentWorkspaceIdAtom)
+  const agentSessions = useAtomValue(agentSessionsAtom)
   const setConvPromptId = useSetAtom(conversationPromptIdAtom)
   const setAgentSidePanelOpen = useSetAtom(agentSidePanelOpenMapAtom)
   const setAgentSidePanelManualCollapseLock = useSetAtom(agentSidePanelManualCollapseLockMapAtom)
@@ -113,7 +121,35 @@ export function TabBar(): React.ReactElement {
 
   const handleActivate = React.useCallback((tabId: string) => {
     setLayout((prev) => focusTab(prev, tabId))
-  }, [setLayout])
+
+    const tab = tabs.find((t) => t.id === tabId)
+    if (!tab) return
+
+    if (tab.type === 'chat') {
+      setAppMode('chat')
+      setCurrentConversationId(tab.sessionId)
+      return
+    }
+
+    setAppMode('agent')
+    setCurrentAgentSessionId(tab.sessionId)
+
+    const session = agentSessions.find((s) => s.id === tab.sessionId)
+    if (!session?.workspaceId) return
+
+    setCurrentAgentWorkspaceId(session.workspaceId)
+    window.electronAPI.updateSettings({
+      agentWorkspaceId: session.workspaceId,
+    }).catch(console.error)
+  }, [
+    setLayout,
+    tabs,
+    setAppMode,
+    setCurrentConversationId,
+    setCurrentAgentSessionId,
+    agentSessions,
+    setCurrentAgentWorkspaceId,
+  ])
 
   const handleClose = React.useCallback((tabId: string) => {
     setTabs((prevTabs) => {

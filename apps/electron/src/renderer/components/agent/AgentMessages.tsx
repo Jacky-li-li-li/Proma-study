@@ -24,7 +24,6 @@ import {
 } from '@/components/ai-elements/conversation'
 import { ScrollMinimap } from '@/components/ai-elements/scroll-minimap'
 import type { MinimapItem } from '@/components/ai-elements/scroll-minimap'
-import { useSmoothStream } from '@proma/ui'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { CopyButton } from '@/components/chat/CopyButton'
 import { formatMessageTime } from '@/components/chat/ChatMessageItem'
@@ -49,6 +48,8 @@ import { useStickToBottomContext } from 'use-stick-to-bottom'
 interface AgentMessagesProps {
   sessionId: string
   messages: AgentMessage[]
+  /** 消息是否已完成首次加载（避免空数组初始化误触发滚动恢复） */
+  messagesLoaded?: boolean
   /** Phase 4: 持久化的 SDKMessage（新格式） */
   persistedSDKMessages?: SDKMessage[]
   streaming: boolean
@@ -57,6 +58,8 @@ interface AgentMessagesProps {
   liveMessages?: SDKMessage[]
   /** 当前会话工作目录，用于解析相对文件路径 */
   sessionPath?: string | null
+  /** 最后一轮是否被用户中断 */
+  stoppedByUser?: boolean
   onRetry?: () => void
   onRetryInNewSession?: () => void
   onFork?: (upToMessageUuid: string) => void
@@ -733,7 +736,21 @@ function VirtualScrollHostBridge({ onHostChange }: { onHostChange: (element: HTM
   return null
 }
 
-export function AgentMessages({ sessionId, messages, persistedSDKMessages, streaming, streamState, liveMessages, sessionPath, onRetry, onRetryInNewSession, onFork, onCompact }: AgentMessagesProps): React.ReactElement {
+export function AgentMessages({
+  sessionId,
+  messages,
+  messagesLoaded = true,
+  persistedSDKMessages,
+  streaming,
+  streamState,
+  liveMessages,
+  sessionPath,
+  stoppedByUser,
+  onRetry,
+  onRetryInNewSession,
+  onFork,
+  onCompact,
+}: AgentMessagesProps): React.ReactElement {
   const userProfile = useAtomValue(userProfileAtom)
   const channels = useAtomValue(channelsAtom)
   const [viewportPhase, setViewportPhase] = React.useState<StreamingViewportPhase>('idle')
@@ -766,6 +783,7 @@ export function AgentMessages({ sessionId, messages, persistedSDKMessages, strea
 
   React.useEffect(() => {
     if (ready) return
+    if (!messagesLoaded) return
     if (messages.length === 0 && (!persistedSDKMessages || persistedSDKMessages.length === 0) && !streaming) {
       setReady(true)
       return
@@ -777,7 +795,7 @@ export function AgentMessages({ sessionId, messages, persistedSDKMessages, strea
       })
     })
     return () => { cancelled = true }
-  }, [messages, streaming, ready])
+  }, [messagesLoaded, messages, persistedSDKMessages, streaming, ready])
 
   React.useEffect(() => {
     const element = messageListRef.current
@@ -796,14 +814,8 @@ export function AgentMessages({ sessionId, messages, persistedSDKMessages, strea
 
   // 从 streamState 属性中计算派生值
   const streamingContent = streamState?.content ?? ''
-  const agentStreamingModel = streamState?.model ? resolveModelDisplayName(streamState.model, channels) : undefined
   const retrying = streamState?.retrying
   const startedAt = streamState?.startedAt
-
-  const { displayedContent: smoothContent } = useSmoothStream({
-    content: streamingContent,
-    isStreaming: streaming,
-  })
 
   /**
    * 流式完成过渡：streaming 结束到持久化消息加载完成之间，
@@ -815,13 +827,13 @@ export function AgentMessages({ sessionId, messages, persistedSDKMessages, strea
       setTransitioning(false)
       return
     }
-    if (streamingContent || smoothContent) {
+    if (streamingContent) {
       setTransitioning(true)
       return
     }
     const timer = setTimeout(() => setTransitioning(false), 150)
     return () => clearTimeout(timer)
-  }, [streaming, streamingContent, smoothContent])
+  }, [streaming, streamingContent])
 
   // 判断是否使用新的 SDKMessage 渲染路径
   const useSDKRenderer = persistedSDKMessages && persistedSDKMessages.length > 0
@@ -889,6 +901,14 @@ export function AgentMessages({ sessionId, messages, persistedSDKMessages, strea
   }, [persistedGroups, liveGroups])
 
   const liveGroupIds = React.useMemo(() => new Set(liveGroups.map((group) => getGroupId(group))), [liveGroups])
+  const stoppedBadgeGroupId = React.useMemo(() => {
+    if (!useSDKRenderer || !stoppedByUser || streaming) return null
+    for (let i = renderedGroups.length - 1; i >= 0; i -= 1) {
+      const group = renderedGroups[i]
+      if (group?.type === 'assistant-turn') return getGroupId(group)
+    }
+    return null
+  }, [useSDKRenderer, stoppedByUser, streaming, renderedGroups])
   const estimatedWidth = messageListWidth > 0 ? messageListWidth : 720
 
   const estimatedMessageHeights = React.useMemo(() => {
@@ -948,9 +968,7 @@ export function AgentMessages({ sessionId, messages, persistedSDKMessages, strea
   const renderedIndexes = virtualizationActive
     ? virtualItems.map((item) => item.index)
     : virtualizationKeys.map((_, index) => index)
-  // 实时消息中是否已有可渲染的助手内容
-  const hasLiveAssistantContent = liveGroups.some((g) => g.type === 'assistant-turn')
-  const hasStreamingText = smoothContent.trim().length > 0
+  const hasStreamingText = streamingContent.trim().length > 0
   const viewportActive = streaming || hasStreamingText || liveGroupIds.size > 0
 
   return (
@@ -975,6 +993,7 @@ export function AgentMessages({ sessionId, messages, persistedSDKMessages, strea
                 const group = renderedGroups[index]
                 if (!group) return null
                 const groupId = getGroupId(group)
+                const showStoppedByUserBadge = group.type === 'assistant-turn' && groupId === stoppedBadgeGroupId && !liveGroupIds.has(groupId)
                 return (
                   <MessageGroupRenderer
                     key={groupId}
@@ -983,6 +1002,7 @@ export function AgentMessages({ sessionId, messages, persistedSDKMessages, strea
                     basePath={sessionPath || undefined}
                     onFork={onFork}
                     isStreaming={liveGroupIds.has(groupId)}
+                    stoppedByUser={showStoppedByUserBadge || undefined}
                     estimatedHeight={estimatedGroupHeights.get(groupId)}
                     measureRef={virtualizationActive ? measureElement(groupId) : undefined}
                   />
@@ -1018,35 +1038,12 @@ export function AgentMessages({ sessionId, messages, persistedSDKMessages, strea
               <div aria-hidden style={{ height: bottomPadding }} />
             )}
 
-            {/* 有实时助手内容时：仅追加运行指示器 */}
-            {hasLiveAssistantContent && !hasStreamingText && (streaming || retrying) && (
+            {/* 流式状态指示器：统一在消息列表底部显示 */}
+            {(streaming || retrying) && (
               <div className="pl-[56px] mt-0.5">
                 {retrying && <RetryingNotice retrying={retrying} />}
                 {streaming && <AgentRunningIndicator startedAt={startedAt} />}
               </div>
-            )}
-
-            {/* 当前尚未收束为完整 assistant message 的 partial 文本，单独显示流式气泡。 */}
-            {/* 注意：工具活动已通过 SDK 渲染路径（liveGroups）展示，此处不再使用 ToolActivityList。 */}
-            {(hasStreamingText || (!hasLiveAssistantContent && (streaming || retrying))) && (
-              <Message from="assistant">
-                <MessageHeader
-                  model={agentStreamingModel}
-                  time={formatMessageTime(Date.now())}
-                  logo={<AssistantLogo model={agentStreamingModel} />}
-                />
-                <MessageContent>
-                  {retrying && <RetryingNotice retrying={retrying} />}
-                  {smoothContent ? (
-                    <>
-                      <MessageResponse basePath={sessionPath || undefined}>{smoothContent}</MessageResponse>
-                      {streaming && <AgentRunningIndicator startedAt={startedAt} />}
-                    </>
-                  ) : (
-                    streaming && <AgentRunningIndicator startedAt={startedAt} />
-                  )}
-                </MessageContent>
-              </Message>
             )}
 
           </>

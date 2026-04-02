@@ -321,7 +321,7 @@ export function ScrollMinimap({ items, onScrollToItem }: ScrollMinimapProps): Re
               className={cn(
                 'absolute left-1 h-[2px] w-[20px] rounded-full transition-colors',
                 isVisible
-                  ? 'bg-primary/60'
+                  ? 'bg-primary/60 minimap-visible-indicator'
                   : hasUser
                     ? 'bg-muted-foreground/25'
                     : 'bg-muted-foreground/45'

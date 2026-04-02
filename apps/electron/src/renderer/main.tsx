@@ -25,31 +25,35 @@ import {
   currentAgentSessionIdAtom,
   workspaceCapabilitiesVersionAtom,
   workspaceFilesVersionAtom,
-  workspaceNewFilesVersionAtom,
-  agentPermissionModeAtom,
+  agentDefaultPermissionModeAtom,
   agentThinkingAtom,
   agentEffortAtom,
   agentMaxBudgetUsdAtom,
   agentMaxTurnsAtom,
+  agentSettingsReadyAtom,
 } from './atoms/agent-atoms'
 import { updateStatusAtom, initializeUpdater } from './atoms/updater'
 import {
   notificationsEnabledAtom,
   initializeNotifications,
 } from './atoms/notifications'
-import {
-  conversationDisplayModeAtom,
-  initializeConversationDisplayMode,
-} from './atoms/conversation-display-mode'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
 import { tabsAtom, splitLayoutAtom } from './atoms/tab-atoms'
 import type { TabItem, SplitLayoutState } from './atoms/tab-atoms'
 import { chatToolsAtom } from './atoms/chat-tool-atoms'
-import { feishuBridgeStateAtom } from './atoms/feishu-atoms'
+import { feishuBotStatesAtom } from './atoms/feishu-atoms'
+import { dingtalkBotStatesAtom } from './atoms/dingtalk-atoms'
+import { wechatBridgeStateAtom } from './atoms/wechat-atoms'
 import { currentConversationIdAtom, channelsAtom, channelsLoadedAtom, selectedModelAtom } from './atoms/chat-atoms'
-import { lastOpenedAgentSessionIdAtom, lastOpenedConversationIdAtom } from './atoms/app-mode'
-import type { FeishuBridgeState, FeishuNotificationSentPayload } from '@proma/shared'
+import type {
+  FeishuBotBridgeState,
+  FeishuBridgeState,
+  FeishuNotificationSentPayload,
+  DingTalkBotBridgeState,
+  DingTalkBridgeState,
+  WeChatBridgeState,
+} from '@proma/shared'
 import { Toaster } from './components/ui/sonner'
 import { toast } from 'sonner'
 import { diffCapabilities, migratePermissionMode } from '@proma/shared'
@@ -59,12 +63,6 @@ import { UpdateDialog } from './components/settings/UpdateDialog'
 import { GlobalShortcuts } from './components/shortcuts/GlobalShortcuts'
 import './styles/globals.css'
 import 'katex/dist/katex.min.css'
-
-declare global {
-  interface Window {
-    __promaRoot?: ReactDOM.Root
-  }
-}
 
 // ===== 窗口类型检测 =====
 const isQuickTaskWindow = new URLSearchParams(window.location.search).get('window') === 'quick-task'
@@ -124,13 +122,13 @@ function AgentSettingsInitializer(): null {
   const setCurrentWorkspaceId = useSetAtom(currentAgentWorkspaceIdAtom)
   const bumpCapabilities = useSetAtom(workspaceCapabilitiesVersionAtom)
   const bumpFiles = useSetAtom(workspaceFilesVersionAtom)
-  const bumpNewFiles = useSetAtom(workspaceNewFilesVersionAtom)
-  const setPermissionMode = useSetAtom(agentPermissionModeAtom)
+  const setPermissionMode = useSetAtom(agentDefaultPermissionModeAtom)
   const setThinking = useSetAtom(agentThinkingAtom)
   const setEffort = useSetAtom(agentEffortAtom)
   const setMaxBudget = useSetAtom(agentMaxBudgetUsdAtom)
   const setMaxTurns = useSetAtom(agentMaxTurnsAtom)
 
+  const setAgentSettingsReady = useSetAtom(agentSettingsReadyAtom)
   const setChannels = useSetAtom(channelsAtom)
   const setChannelsLoaded = useSetAtom(channelsLoadedAtom)
   const store = useStore()
@@ -218,9 +216,16 @@ function AgentSettingsInitializer(): null {
         } else if (workspaces.length > 0) {
           setCurrentWorkspaceId(workspaces[0]!.id)
         }
-      }).catch(console.error)
-    }).catch(console.error)
-  }, [setAgentChannelId, setAgentModelId, setAgentChannelIds, setAgentWorkspaces, setCurrentWorkspaceId, setPermissionMode, setThinking, setEffort, setMaxBudget, setMaxTurns, setChannels, setChannelsLoaded])
+        setAgentSettingsReady(true)
+      }).catch((err) => {
+        console.error(err)
+        setAgentSettingsReady(true) // 即使出错也标记就绪，避免永远阻塞
+      })
+    }).catch((err) => {
+      console.error(err)
+      setAgentSettingsReady(true) // 即使出错也标记就绪，避免永远阻塞
+    })
+  }, [setAgentChannelId, setAgentModelId, setAgentChannelIds, setAgentWorkspaces, setCurrentWorkspaceId, setPermissionMode, setThinking, setEffort, setMaxBudget, setMaxTurns, setChannels, setChannelsLoaded, setAgentSettingsReady])
 
   // 工作区切换时重置能力缓存，预加载基线
   useEffect(() => {
@@ -262,18 +267,15 @@ function AgentSettingsInitializer(): null {
 
       bumpCapabilities((v) => v + 1)
     })
-    const unsubFiles = window.electronAPI.onWorkspaceFilesChanged((payload) => {
+    const unsubFiles = window.electronAPI.onWorkspaceFilesChanged(() => {
       bumpFiles((v) => v + 1)
-      if (payload.hasNewFile) {
-        bumpNewFiles((v) => v + 1)
-      }
     })
 
     return () => {
       unsubCapabilities()
       unsubFiles()
     }
-  }, [bumpCapabilities, bumpFiles, bumpNewFiles, currentWorkspaceId, workspaces])
+  }, [bumpCapabilities, bumpFiles, currentWorkspaceId, workspaces])
 
   return null
 }
@@ -305,43 +307,6 @@ function NotificationsInitializer(): null {
   useEffect(() => {
     initializeNotifications(setEnabled)
   }, [setEnabled])
-
-  return null
-}
-
-/**
- * 会话显示模式初始化组件
- *
- * 从主进程加载消息气泡布局设置。
- */
-function ConversationDisplayModeInitializer(): null {
-  const setMode = useSetAtom(conversationDisplayModeAtom)
-
-  useEffect(() => {
-    initializeConversationDisplayMode(setMode)
-  }, [setMode])
-
-  return null
-}
-
-/**
- * 记住每个模式最后一次打开的会话 ID
- */
-function LastOpenedSessionInitializer(): null {
-  const currentConversationId = useAtomValue(currentConversationIdAtom)
-  const currentAgentSessionId = useAtomValue(currentAgentSessionIdAtom)
-  const setLastOpenedConversationId = useSetAtom(lastOpenedConversationIdAtom)
-  const setLastOpenedAgentSessionId = useSetAtom(lastOpenedAgentSessionIdAtom)
-
-  useEffect(() => {
-    if (!currentConversationId) return
-    setLastOpenedConversationId(currentConversationId)
-  }, [currentConversationId, setLastOpenedConversationId])
-
-  useEffect(() => {
-    if (!currentAgentSessionId) return
-    setLastOpenedAgentSessionId(currentAgentSessionId)
-  }, [currentAgentSessionId, setLastOpenedAgentSessionId])
 
   return null
 }
@@ -410,14 +375,30 @@ function FeishuInitializer(): null {
   const store = useStore()
 
   useEffect(() => {
-    // 加载初始状态
-    window.electronAPI.getFeishuStatus()
-      .then((state: FeishuBridgeState) => store.set(feishuBridgeStateAtom, state))
-      .catch((err: unknown) => console.error('[FeishuInitializer] 加载状态失败:', err))
+    // 加载初始多 Bot 状态
+    window.electronAPI.getFeishuMultiStatus?.()
+      .then((multiState: { bots: Record<string, FeishuBotBridgeState> }) => {
+        store.set(feishuBotStatesAtom, multiState.bots)
+      })
+      .catch(() => {
+        // 回退：使用旧 API 获取单 Bot 状态
+        window.electronAPI.getFeishuStatus()
+          .then((state: FeishuBridgeState) => {
+            const s = state as FeishuBotBridgeState
+            const botId = s.botId ?? 'default'
+            store.set(feishuBotStatesAtom, { [botId]: { ...s, botId, botName: s.botName ?? '飞书助手' } })
+          })
+          .catch((err: unknown) => console.error('[FeishuInitializer] 加载状态失败:', err))
+      })
 
-    // 订阅状态变化
-    const cleanupStatus = window.electronAPI.onFeishuStatusChanged((state: FeishuBridgeState) => {
-      store.set(feishuBridgeStateAtom, state)
+    // 订阅状态变化（现在每次推送包含 botId）
+    const cleanupStatus = window.electronAPI.onFeishuStatusChanged((raw: FeishuBridgeState) => {
+      const state = raw as FeishuBotBridgeState
+      const botId = state.botId ?? 'default'
+      store.set(feishuBotStatesAtom, (prev) => ({
+        ...prev,
+        [botId]: { ...state, botId, botName: state.botName ?? '飞书助手' },
+      }))
     })
 
     // 订阅通知已发送事件 → Sonner + 桌面通知
@@ -458,6 +439,76 @@ function FeishuInitializer(): null {
   return null
 }
 
+/**
+ * DingTalkInitializer
+ *
+ * - 加载多 Bot 初始状态
+ * - 订阅钉钉 Bridge 状态变化
+ */
+function DingTalkInitializer(): null {
+  const store = useStore()
+
+  useEffect(() => {
+    // 加载初始多 Bot 状态
+    window.electronAPI.getDingTalkMultiStatus?.()
+      .then((multiState: { bots: Record<string, DingTalkBotBridgeState> }) => {
+        store.set(dingtalkBotStatesAtom, multiState.bots)
+      })
+      .catch(() => {
+        // 回退：使用旧 API 获取单 Bot 状态
+        window.electronAPI.getDingTalkStatus()
+          .then((state: DingTalkBridgeState) => {
+            const s = state as DingTalkBotBridgeState
+            const botId = s.botId ?? 'default'
+            store.set(dingtalkBotStatesAtom, { [botId]: { ...s, botId, botName: s.botName ?? '钉钉助手' } })
+          })
+          .catch((err: unknown) => console.error('[DingTalkInitializer] 加载状态失败:', err))
+      })
+
+    // 订阅状态变化（现在每次推送包含 botId）
+    const cleanupStatus = window.electronAPI.onDingTalkStatusChanged((raw: DingTalkBridgeState) => {
+      const state = raw as DingTalkBotBridgeState
+      const botId = state.botId ?? 'default'
+      store.set(dingtalkBotStatesAtom, (prev) => ({
+        ...prev,
+        [botId]: { ...state, botId, botName: state.botName ?? '钉钉助手' },
+      }))
+    })
+
+    return () => {
+      cleanupStatus()
+    }
+  }, [store])
+
+  return null
+}
+
+/**
+ * WeChatInitializer
+ *
+ * - 加载微信 Bridge 初始状态（保证 BotHub 侧栏状态正确）
+ * - 订阅微信状态变化
+ */
+function WeChatInitializer(): null {
+  const setWeChatState = useSetAtom(wechatBridgeStateAtom)
+
+  useEffect(() => {
+    window.electronAPI.getWeChatStatus()
+      .then((state: WeChatBridgeState) => {
+        setWeChatState(state)
+      })
+      .catch((err: unknown) => console.error('[WeChatInitializer] 加载状态失败:', err))
+
+    const cleanup = window.electronAPI.onWeChatStatusChanged((state: WeChatBridgeState) => {
+      setWeChatState(state)
+    })
+
+    return cleanup
+  }, [setWeChatState])
+
+  return null
+}
+
 // ===== 快速任务窗口：轻量渲染 =====
 if (isQuickTaskWindow) {
   import('./components/quick-task/QuickTaskApp').then(({ QuickTaskApp }) => {
@@ -470,22 +521,18 @@ if (isQuickTaskWindow) {
   })
 } else {
   // ===== 主窗口：完整渲染 =====
-  const rootElement = document.getElementById('root')!
-  const root = window.__promaRoot ?? ReactDOM.createRoot(rootElement)
-  window.__promaRoot = root
-
-  root.render(
+  ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
       <ThemeInitializer />
       <AgentSettingsInitializer />
-      <LastOpenedSessionInitializer />
       <NotificationsInitializer />
-      <ConversationDisplayModeInitializer />
       <ChatListenersInitializer />
       <AgentListenersInitializer />
       <ChatToolInitializer />
       <UpdaterInitializer />
       <FeishuInitializer />
+      <DingTalkInitializer />
+      <WeChatInitializer />
       <GlobalShortcuts />
       <App />
       <UpdateDialog />

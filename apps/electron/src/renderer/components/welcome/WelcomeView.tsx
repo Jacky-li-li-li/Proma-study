@@ -10,104 +10,65 @@
  */
 
 import * as React from 'react'
-import { useAtom, useSetAtom, useStore } from 'jotai'
+import { useAtom, useAtomValue } from 'jotai'
 import { Loader2 } from 'lucide-react'
 import { appModeAtom } from '@/atoms/app-mode'
-import { conversationsAtom, currentConversationIdAtom } from '@/atoms/chat-atoms'
-import { agentSessionsAtom, currentAgentSessionIdAtom, currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
+import { conversationsAtom } from '@/atoms/chat-atoms'
+import { agentSessionsAtom, currentAgentWorkspaceIdAtom, agentSettingsReadyAtom } from '@/atoms/agent-atoms'
 import { tabsAtom, splitLayoutAtom, openTab } from '@/atoms/tab-atoms'
-import { activeViewAtom } from '@/atoms/active-view'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { useCreateSession } from '@/hooks/useCreateSession'
 
-declare global {
-  interface Window {
-    __promaWelcomeBootstrapPromise?: Promise<void> | null
-  }
-}
-
 export function WelcomeView(): React.ReactElement {
-  const [mode] = useAtom(appModeAtom)
-  const [currentWorkspaceId] = useAtom(currentAgentWorkspaceIdAtom)
+  const mode = useAtomValue(appModeAtom)
+  const conversations = useAtomValue(conversationsAtom)
+  const agentSessions = useAtomValue(agentSessionsAtom)
+  const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
+  const agentSettingsReady = useAtomValue(agentSettingsReadyAtom)
+  const draftSessionIds = useAtomValue(draftSessionIdsAtom)
   const [tabs, setTabs] = useAtom(tabsAtom)
   const [layout, setLayout] = useAtom(splitLayoutAtom)
-  const [draftSessionIds] = useAtom(draftSessionIdsAtom)
-  const setConversations = useSetAtom(conversationsAtom)
-  const setCurrentConversationId = useSetAtom(currentConversationIdAtom)
-  const setAgentSessions = useSetAtom(agentSessionsAtom)
-  const setCurrentAgentSessionId = useSetAtom(currentAgentSessionIdAtom)
-  const setActiveView = useSetAtom(activeViewAtom)
-  const store = useStore()
   const { createChat, createAgent } = useCreateSession()
+  const initRef = React.useRef(false)
 
   React.useEffect(() => {
-    if (window.__promaWelcomeBootstrapPromise) return
+    if (initRef.current) return
+    // Agent 模式需等待 settings 就绪（workspaceId 等异步加载完成）
+    if (mode === 'agent' && !agentSettingsReady) return
+    initRef.current = true
 
-    const bootstrapPromise = (async () => {
-      if (mode === 'agent') {
-        const sessions = await window.electronAPI.listAgentSessions()
-        setAgentSessions(sessions)
-
-        const latestSession = sessions.find(
-          (s) => !s.archived && s.workspaceId === currentWorkspaceId && !draftSessionIds.has(s.id),
-        )
-        if (latestSession) {
-          const result = openTab(store.get(tabsAtom), store.get(splitLayoutAtom), {
-            type: 'agent',
-            sessionId: latestSession.id,
-            title: latestSession.title,
-          })
-          setTabs(result.tabs)
-          setLayout(result.layout)
-          setCurrentAgentSessionId(latestSession.id)
-          setActiveView('conversations')
-          return
-        }
-
-        await createAgent({ draft: true })
-        return
-      }
-
-      const conversations = await window.electronAPI.listConversations()
-      setConversations(conversations)
-
-      const latestConversation = conversations.find((c) => !c.archived && !draftSessionIds.has(c.id))
-      if (latestConversation) {
-        const result = openTab(store.get(tabsAtom), store.get(splitLayoutAtom), {
+    if (mode === 'chat') {
+      // 优先复用现有非归档、非 draft 会话
+      const existing = conversations.find((c) => !c.archived && !draftSessionIds.has(c.id))
+      if (existing) {
+        const result = openTab(tabs, layout, {
           type: 'chat',
-          sessionId: latestConversation.id,
-          title: latestConversation.title,
+          sessionId: existing.id,
+          title: existing.title,
         })
         setTabs(result.tabs)
         setLayout(result.layout)
-        setCurrentConversationId(latestConversation.id)
-        setActiveView('conversations')
-        return
+      } else {
+        createChat({ draft: true })
       }
-
-      await createChat({ draft: true })
-    })().finally(() => {
-      window.__promaWelcomeBootstrapPromise = null
-    })
-
-    window.__promaWelcomeBootstrapPromise = bootstrapPromise
-  }, [
-    mode,
-    currentWorkspaceId,
-    draftSessionIds,
-    tabs,
-    layout,
-    store,
-    setTabs,
-    setLayout,
-    setConversations,
-    setCurrentConversationId,
-    setAgentSessions,
-    setCurrentAgentSessionId,
-    setActiveView,
-    createChat,
-    createAgent,
-  ])
+    } else {
+      // Agent 模式：按当前工作区过滤
+      const existing = agentSessions.find(
+        (s) => !s.archived && s.workspaceId === currentWorkspaceId && !draftSessionIds.has(s.id),
+      )
+      if (existing) {
+        const result = openTab(tabs, layout, {
+          type: 'agent',
+          sessionId: existing.id,
+          title: existing.title,
+        })
+        setTabs(result.tabs)
+        setLayout(result.layout)
+      } else {
+        createAgent({ draft: true })
+      }
+    }
+  }, [agentSettingsReady]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 短暂的过渡状态（通常几十毫秒内就会被 SplitContainer 替换）
   return (

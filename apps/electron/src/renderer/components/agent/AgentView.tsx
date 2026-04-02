@@ -20,11 +20,11 @@ import { Bot, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, 
 import { AgentMessages } from './AgentMessages'
 import { AgentHeader } from './AgentHeader'
 import { ContextUsageBadge } from './ContextUsageBadge'
-import { Badge } from '@/components/ui/badge'
 import { PermissionBanner } from './PermissionBanner'
 import { PermissionModeSelector } from './PermissionModeSelector'
 import { AskUserBanner } from './AskUserBanner'
 import { ExitPlanModeBanner } from './ExitPlanModeBanner'
+import { PlanModeDashedBorder } from './PlanModeDashedBorder'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import { AttachmentPreviewItem } from '@/components/chat/AttachmentPreviewItem'
 import { RichTextInput } from '@/components/ai-elements/rich-text-input'
@@ -51,24 +51,27 @@ import {
   agentMessageRefreshAtom,
   agentSessionsAtom,
   currentAgentSessionIdAtom,
-  agentSidePanelOpenMapAtom,
   agentAttachedDirectoriesMapAtom,
   workspaceAttachedDirectoriesMapAtom,
   liveMessagesMapAtom,
   agentThinkingAtom,
   stoppedByUserSessionsAtom,
   agentPlanModeSessionsAtom,
+  agentPermissionModeMapAtom,
+  agentDefaultPermissionModeAtom,
   agentSessionPathMapAtom,
+  allPendingAskUserRequestsAtom,
+  allPendingExitPlanRequestsAtom,
+  allPendingPermissionRequestsAtom,
 } from '@/atoms/agent-atoms'
 import type { AgentContextStatus } from '@/atoms/agent-atoms'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { channelsAtom, thinkingExpandedAtom } from '@/atoms/chat-atoms'
-import { tabsAtom, splitLayoutAtom, openTab, sidebarCollapsedAtom } from '@/atoms/tab-atoms'
+import { tabsAtom, splitLayoutAtom, openTab } from '@/atoms/tab-atoms'
 import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import type { AgentSendInput, AgentMessage, AgentPendingFile, ModelOption, SDKMessage } from '@proma/shared'
 import { fileToBase64 } from '@/lib/file-utils'
-import { requestScrollToLatest } from '@/hooks/useScrollPositionMemory'
 
 // ===== 思考模式 Hover Popover =====
 
@@ -157,8 +160,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const streamingStates = useAtomValue(agentStreamingStatesAtom)
   const streamState = streamingStates.get(sessionId)
   const streaming = streamState?.running ?? false
-  const stoppedByUserSessions = useAtomValue(stoppedByUserSessionsAtom)
-  const stoppedByUser = stoppedByUserSessions.has(sessionId)
   const liveMessagesMap = useAtomValue(liveMessagesMapAtom)
   const setLiveMessagesMap = useSetAtom(liveMessagesMapAtom)
   const liveMessages = liveMessagesMap.get(sessionId) ?? []
@@ -208,10 +209,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const contextStatus: AgentContextStatus = {
     isCompacting: streamState?.isCompacting ?? false,
     inputTokens: streamState?.inputTokens,
-    outputTokens: streamState?.outputTokens,
-    cacheReadTokens: streamState?.cacheReadTokens,
-    cacheCreationTokens: streamState?.cacheCreationTokens,
-    costUsd: streamState?.costUsd,
     contextWindow: streamState?.contextWindow,
   }
   const setAgentStreamErrors = useSetAtom(agentStreamErrorsAtom)
@@ -219,6 +216,12 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const agentError = streamErrors.get(sessionId) ?? null
   const planModeSessions = useAtomValue(agentPlanModeSessionsAtom)
   const isPlanMode = planModeSessions.has(sessionId)
+  const stoppedByUserSessions = useAtomValue(stoppedByUserSessionsAtom)
+  const stoppedByUser = stoppedByUserSessions.has(sessionId)
+  const permissionModeMap = useAtomValue(agentPermissionModeMapAtom)
+  const defaultPermissionMode = useAtomValue(agentDefaultPermissionModeAtom)
+  const permissionMode = permissionModeMap.get(sessionId) ?? defaultPermissionMode
+  const isPermissionPlanMode = permissionMode === 'plan'
   const store = useStore()
   const suggestionsMap = useAtomValue(agentPromptSuggestionsAtom)
   const suggestion = suggestionsMap.get(sessionId) ?? null
@@ -227,10 +230,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const setCurrentAgentSessionId = useSetAtom(currentAgentSessionIdAtom)
   const [tabs, setTabs] = useAtom(tabsAtom)
   const [layout, setLayout] = useAtom(splitLayoutAtom)
-  const sidebarCollapsed = useAtomValue(sidebarCollapsedAtom)
-  const sidePanelOpenMap = useAtomValue(agentSidePanelOpenMapAtom)
-  const isAgentSidePanelOpen = sidePanelOpenMap.get(sessionId) ?? false
-  const useFluidWidth = !sidebarCollapsed && !isAgentSidePanelOpen
   const setAttachedDirsMap = useSetAtom(agentAttachedDirectoriesMapAtom)
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
   const attachedDirs = attachedDirsMap.get(sessionId) ?? []
@@ -381,16 +380,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           const state = prev.get(sessionId)
           if (!state || state.running) return prev  // 仍在运行中，不清除
           const map = new Map(prev)
-          // 保留最近一次 token 统计，避免输入区 ContextUsageBadge 消失
-          map.set(sessionId, {
-            ...state,
-            running: false,
-            content: '',
-            toolActivities: [],
-            teammates: [],
-            waitingResume: false,
-            retrying: undefined,
-          })
+          map.delete(sessionId)
           return map
         })
         setLiveMessagesMap((prev) => {
@@ -403,7 +393,10 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           return map
         })
       })
-      .catch(console.error)
+      .catch((error) => {
+        console.error(error)
+        setMessagesLoaded(true)
+      })
   }, [sessionId, refreshVersion, setStreamingStates, setLiveMessagesMap, store])
 
   // 从会话元数据初始化附加目录
@@ -701,8 +694,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     // 如果输入为空但有建议，使用建议内容
     const effectiveText = text || suggestion || ''
     if ((!effectiveText && pendingFiles.length === 0) || !agentChannelId) return
-
-    requestScrollToLatest(sessionId)
 
     // 上一条消息仍在处理中，直接追加发送
     if (streaming) {
@@ -1095,25 +1086,20 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     return () => window.removeEventListener('proma:focus-input', handler)
   }, [])
 
+  const allAskUserRequests = useAtomValue(allPendingAskUserRequestsAtom)
+  const allExitPlanRequests = useAtomValue(allPendingExitPlanRequestsAtom)
+  const allPermissionRequests = useAtomValue(allPendingPermissionRequestsAtom)
+  const hasBannerOverlay =
+    (allAskUserRequests.get(sessionId)?.length ?? 0) > 0 ||
+    (allExitPlanRequests.get(sessionId)?.length ?? 0) > 0 ||
+    (allPermissionRequests.get(sessionId)?.length ?? 0) > 0
+
   const canSend = (inputContent.trim().length > 0 || pendingFiles.length > 0) && agentChannelId !== null && !streaming
 
   return (
     <AgentSessionProvider sessionId={sessionId}>
       {/* 主内容区域 */}
-      <div className={cn(
-        'flex flex-col h-full flex-1 min-w-0',
-        sidebarCollapsed || useFluidWidth ? 'w-full' : 'w-full max-w-[min(72rem,100%)]'
-      )}
-      style={sidebarCollapsed
-        ? {
-          marginLeft: 'var(--session-content-left-offset, 0px)',
-          marginRight: 'var(--session-content-left-offset, 0px)',
-          width: 'calc(100% - var(--session-content-left-offset, 0px) - var(--session-content-left-offset, 0px))',
-        }
-        : {
-          marginLeft: 'var(--session-content-left-offset, 0px)',
-        }}
-      >
+      <div className="flex flex-col h-full flex-1 min-w-0 max-w-[min(72rem,100%)] mx-auto">
         {/* Agent Header */}
         <AgentHeader sessionId={sessionId} />
 
@@ -1121,11 +1107,13 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         <AgentMessages
           sessionId={sessionId}
           messages={messages}
+          messagesLoaded={messagesLoaded}
           persistedSDKMessages={persistedSDKMessages}
           streaming={streaming}
           streamState={streamState}
           liveMessages={liveMessages}
           sessionPath={sessionPath}
+          stoppedByUser={stoppedByUser}
           onRetry={handleRetry}
           onRetryInNewSession={handleRetryInNewSession}
           onFork={handleFork}
@@ -1165,17 +1153,20 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         {/* ExitPlanMode 计划审批横幅 */}
         <ExitPlanModeBanner sessionId={sessionId} />
 
-        {/* 输入区域 — 复用 Chat 的卡片式输入风格 */}
-        <div className="px-2.5 pb-2.5 md:px-[18px] md:pb-[18px] pt-2" data-input-mode="agent">
+        {/* 输入区域 — 交互横幅显示时隐藏，由横幅替代 */}
+        {!hasBannerOverlay && (
+        <div className="px-2.5 pb-2.5 md:px-[18px] md:pb-[18px]" data-input-mode="agent">
           <div
             className={cn(
-              'rounded-[17px] border-[0.5px] border-border bg-background/70 backdrop-blur-sm pt-2 transition-all duration-200',
+              'rounded-[17px] border-[0.5px] border-border bg-background/70 backdrop-blur-sm transition-all duration-200',
+              (isPlanMode || isPermissionPlanMode) && !isDragOver && 'plan-mode-border',
               isDragOver && 'border-[2px] border-dashed border-[#2ecc71] bg-[#2ecc71]/[0.03]'
             )}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
           >
+            {(isPlanMode || isPermissionPlanMode) && !isDragOver && <PlanModeDashedBorder />}
             {/* 无 Agent 渠道提示 */}
             {!agentChannelId && (
               <div className="flex items-center gap-2 px-4 py-2 text-sm text-amber-600 dark:text-amber-400">
@@ -1193,7 +1184,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
             {/* 附件预览区域 */}
             {pendingFiles.length > 0 && (
-              <div className="flex flex-wrap gap-2 px-3 pb-1.5">
+              <div className="flex flex-wrap gap-2 px-3 pt-2.5 pb-1.5">
                 {pendingFiles.map((file) => (
                   <AttachmentPreviewItem
                     key={file.id}
@@ -1208,7 +1199,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
             {/* Agent 建议提示 */}
             {suggestion && !streaming && (
-              <div className="px-3 pb-1.5">
+              <div className="px-3 pt-2.5 pb-1.5">
                 <button
                   type="button"
                   className="group flex items-start gap-2 w-full rounded-lg border border-dashed border-primary/30 bg-primary/[0.03] px-3 py-2.5 text-left text-sm transition-colors hover:border-primary/50 hover:bg-primary/[0.06]"
@@ -1258,7 +1249,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
                   externalSelectedModel={externalSelectedModel}
                   onModelSelect={handleModelSelect}
                 />
-                <PermissionModeSelector />
+                <PermissionModeSelector sessionId={sessionId} />
                 {/* 思考模式切换 + 展开偏好 */}
                 <AgentThinkingPopover
                   agentThinking={agentThinking}
@@ -1312,11 +1303,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
                   isProcessing={streaming}
                   onCompact={handleCompact}
                 />
-                {!streaming && stoppedByUser && (
-                  <Badge variant="outline" className="text-xs text-muted-foreground/70 border-muted-foreground/30 shrink-0">
-                    已被用户中断
-                  </Badge>
-                )}
                 {/* <FeishuNotifyToggle sessionId={sessionId} /> */}
               </div>
 
@@ -1326,10 +1312,10 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
                     type="button"
                     variant="ghost"
                     size="icon"
-                    className="size-[36px] rounded-full text-destructive hover:bg-destructive/10"
+                    className="size-[36px] rounded-full text-destructive hover:!text-[hsl(0,75%,55%)] hover:!bg-[var(--stop-hover-bg)]"
                     onClick={handleStop}
                   >
-                    <Square className="size-[22px]" />
+                    <Square className="size-[16px]" fill="currentColor" strokeWidth={0} />
                   </Button>
                 ) : (
                   <Button
@@ -1352,6 +1338,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             </div>
           </div>
         </div>
+        )}
       </div>
     </AgentSessionProvider>
   )

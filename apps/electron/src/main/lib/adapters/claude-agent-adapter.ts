@@ -308,9 +308,8 @@ export class ClaudeAgentAdapter implements AgentProviderAdapter {
         ...(options.maxTurns != null && { maxTurns: options.maxTurns }),
         permissionMode: options.sdkPermissionMode,
         allowDangerouslySkipPermissions: options.allowDangerouslySkipPermissions,
-        // 开启 partial assistant 事件，前端可基于 text delta 连续更新当前回复；
-        // 完整 assistant 消息仍会在 message_stop 后正常产出，兼容现有持久化链路。
-        includePartialMessages: true,
+        // 关键：false 获取完整消息，与 v2 stream() 返回格式一致
+        includePartialMessages: false,
         promptSuggestions: true,
         cwd: options.cwd,
         abortController: controller,
@@ -459,5 +458,23 @@ export class ClaudeAgentAdapter implements AgentProviderAdapter {
     // 此处我们通过重新注入一个 'now' 优先级的空消息来间接触发
     // 实际上 SDK 的 cancel_async_message 是 control_request，暂时在 orchestrator 层管理
     console.log(`[Claude 适配器] 队列消息取消请求: sessionId=${sessionId}, uuid=${messageUuid}`)
+  }
+
+  /**
+   * 动态切换活跃查询的权限模式
+   *
+   * 通过 SDK Query.setPermissionMode() 方法在查询进行中切换权限模式。
+   * 典型场景：Plan 模式审批通过后切换到 bypassPermissions 或 acceptEdits。
+   */
+  async setPermissionMode(sessionId: string, mode: string): Promise<void> {
+    const query = activeQueries.get(sessionId)
+    if (!query) {
+      console.warn(`[Claude 适配器] 无活跃查询，跳过权限模式切换: ${sessionId}`)
+      return
+    }
+    await (query as ReturnType<typeof import('@anthropic-ai/claude-agent-sdk').query>).setPermissionMode(
+      mode as import('@anthropic-ai/claude-agent-sdk').PermissionMode,
+    )
+    console.log(`[Claude 适配器] 权限模式已切换: sessionId=${sessionId}, mode=${mode}`)
   }
 }

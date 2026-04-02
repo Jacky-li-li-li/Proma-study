@@ -909,7 +909,7 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
           <TooltipTrigger asChild>
             <button
               onClick={handleCreateSession}
-              className="w-full h-[36px] flex items-center justify-center rounded-[10px] text-foreground/70 bg-primary/5 hover:bg-primary/10 transition-colors duration-100 titlebar-no-drag border border-dashed border-primary/20 hover:border-primary/30"
+              className="w-full h-[36px] flex items-center justify-center rounded-[10px] text-foreground/70 bg-primary/5 hover:bg-primary/10 transition-colors duration-100 titlebar-no-drag border border-dashed border-[hsl(var(--dashed-border))] hover:border-[hsl(var(--dashed-border-hover))]"
             >
               <Plus size={14} />
             </button>
@@ -945,7 +945,7 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
           <TooltipTrigger asChild>
             <button
               onClick={() => setSearchDialogOpen(true)}
-              className="w-full h-[36px] flex items-center justify-center rounded-[10px] text-foreground/40 bg-primary/5 hover:bg-primary/10 hover:text-foreground/60 transition-colors duration-100 titlebar-no-drag border border-dashed border-primary/20 hover:border-primary/30"
+              className="w-full h-[36px] flex items-center justify-center rounded-[10px] text-foreground/40 bg-primary/5 hover:bg-primary/10 hover:text-foreground/60 transition-colors duration-100 titlebar-no-drag border border-dashed border-[hsl(var(--dashed-border))] hover:border-[hsl(var(--dashed-border-hover))]"
             >
               <Search size={14} />
             </button>
@@ -1412,8 +1412,8 @@ function ConversationItem({
 
       {/* 操作按钮组（hover 时可见） */}
       <div className={cn(
-        'flex items-center gap-0.5 flex-shrink-0 transition-all duration-100',
-        hovered && !editing && !multiSelect ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        'flex items-center gap-0.5 flex-shrink-0 transition-all duration-100 overflow-hidden',
+        hovered && !editing && !multiSelect ? 'opacity-100' : 'opacity-0 w-0 pointer-events-none'
       )}>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -1609,8 +1609,8 @@ function AgentSessionItem({
 
       {/* 操作按钮组（hover 时可见） */}
       <div className={cn(
-        'flex items-center gap-0.5 flex-shrink-0 transition-all duration-100',
-        hovered && !editing && !multiSelect ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        'flex items-center gap-0.5 flex-shrink-0 transition-all duration-100 overflow-hidden',
+        hovered && !editing && !multiSelect ? 'opacity-100' : 'opacity-0 w-0 pointer-events-none'
       )}>
         <Tooltip>
           <TooltipTrigger asChild>

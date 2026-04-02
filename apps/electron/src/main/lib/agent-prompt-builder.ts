@@ -84,8 +84,6 @@ interface SystemPromptContext {
   permissionMode: PromaPermissionMode
   /** 记忆服务是否已启用且配置了 API Key */
   memoryEnabled: boolean
-  /** 用户在设置中填写的 Agent 自定义提示词（非空时替换内置提示词） */
-  customPromptAppend?: string
 }
 
 /**
@@ -96,12 +94,6 @@ interface SystemPromptContext {
  * 工具（Read/Write/Edit/Bash 等）由 SDK 独立注册，不受 systemPrompt 影响。
  */
 export function buildSystemPrompt(ctx: SystemPromptContext): string {
-  // 替换模式：用户填写了自定义提示词时，直接使用该提示词，不再拼接内置 Proma 提示词
-  const customPromptOverride = ctx.customPromptAppend?.trim()
-  if (customPromptOverride) {
-    return customPromptOverride
-  }
-
   const profile = getUserProfile()
   const userName = profile.userName || '用户'
 
@@ -127,25 +119,45 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
   // SubAgent 委派策略
   sections.push(`## SubAgent 委派策略
 
-**核心原则：先探索再行动，用 SubAgent 保持主上下文干净。**
+**核心原则：先探索再行动，用 SubAgent 保持主上下文干净。根据任务复杂度选择合适的模型。**
 
-Agent 工具支持 \`model\` 参数（可选值：\`sonnet\` / \`opus\` / \`haiku\`），善用 haiku 模型执行探索和收集类任务，速度快、成本低、不污染主上下文。
+Agent 工具支持 \`model\` 参数（可选值：\`sonnet\` / \`opus\` / \`haiku\`），默认使用 haiku 保持高效低成本，但复杂任务应升级模型。
+
+### 模型选择策略
+
+根据子任务的复杂度选择驱动 SubAgent 的模型：
+
+| 模型 | 适用场景 | 示例 |
+|------|---------|------|
+| **haiku** | 信息收集、简单搜索、格式化整理、常规代码审查 | 搜索文件结构、查找函数定义、检查命名规范 |
+| **sonnet** | 需要推理和判断的分析任务、中等复杂度的代码生成 | 方案对比与推荐、复杂 bug 根因分析、跨模块影响评估、中等规模的代码重构 |
+| **opus** | 高难度架构决策、复杂系统设计、需要深度推理的任务 | 大规模架构重构方案、复杂算法设计、安全审计、涉及多系统的集成方案 |
+
+**升级信号**（出现以下情况时考虑使用更高能力的模型）：
+- 任务需要在多个互相矛盾的约束间权衡取舍 → sonnet+
+- 需要理解复杂的业务逻辑或跨多个模块的调用链 → sonnet+
+- 需要创造性地设计新架构或解决没有明显解法的问题 → opus
+- haiku 返回的结果质量不够、遗漏关键细节 → 用更高模型重试
+
+**降级原则**：能用 haiku 解决的不要升级。模型升级意味着更高的延迟和成本，只在复杂度确实需要时升级。
 
 ### 内置 SubAgent
 
 系统已预定义以下子代理，可直接通过 Agent 工具按名称调用：
 
-- **explorer**（haiku）：代码库探索。快速搜索文件、理解项目结构、收集相关上下文。动手修改前优先调用
-- **researcher**（haiku）：技术调研。方案对比、依赖评估、架构分析，输出结构化调研报告
-- **code-reviewer**（haiku）：代码审查。任务完成后调用，检查代码质量和规范一致性
+- **explorer**（默认 haiku）：代码库探索。快速搜索文件、理解项目结构、收集相关上下文。动手修改前优先调用
+- **researcher**（默认 haiku，复杂调研升级 sonnet）：技术调研。方案对比、依赖评估、架构分析，输出结构化调研报告
+- **code-reviewer**（默认 haiku，关键变更升级 sonnet）：代码审查。任务完成后调用，检查代码质量和规范一致性
+
+调用内置 SubAgent 时可通过 \`model\` 参数覆盖默认模型，例如：对复杂的架构调研使用 \`model: "sonnet"\` 调用 researcher。
 
 ### 何时委派 SubAgent
 
 - 需要探索代码库、搜索多个文件、理解项目结构时 → 委派 \`explorer\`
-- 需要调研技术方案、对比多个选项时 → 委派 \`researcher\`
-- 代码修改完成后做质量检查 → 委派 \`code-reviewer\`
+- 需要调研技术方案、对比多个选项时 → 委派 \`researcher\`（复杂决策用 sonnet）
+- 代码修改完成后做质量检查 → 委派 \`code-reviewer\`（核心模块变更用 sonnet）
 - 需要并行处理多个独立子任务时 → 同时委派多个 SubAgent
-- 以上内置 SubAgent 不满足需求时，也可以自行定义临时 SubAgent（指定 model: "haiku" 降低成本）
+- 以上内置 SubAgent 不满足需求时，也可以自行定义临时 SubAgent，根据复杂度选择模型
 
 ### 不需要委派的场景
 
@@ -158,16 +170,17 @@ Agent 工具支持 \`model\` 参数（可选值：\`sonnet\` / \`opus\` / \`haik
 - 给 SubAgent 清晰的任务描述，说明要收集什么信息、返回什么格式
 - 可以同时启动多个 SubAgent 并行工作
 - SubAgent 返回结果后，在主上下文中整合并做决策
+- 选择模型时先评估任务复杂度，默认 haiku，有明确复杂度信号时再升级
 
 ### 典型工作流（复杂任务）
 
-1. 委派 \`explorer\` 探索代码库、收集上下文
-2. 根据探索结果，委派 \`researcher\` 分析方案（如需要）
+1. 委派 \`explorer\`（haiku）探索代码库、收集上下文
+2. 根据探索结果，委派 \`researcher\` 分析方案（简单对比用 haiku，深度分析用 sonnet）
 3. 整合所有信息，将调研结果输出到 \`.context/note.md\`
 4. 不确定的部分调用头脑风暴 Skill 与用户确认
-5. 进入 Plan 模式输出执行计划，确保每一步在用户掌控之下
+5. 将执行计划输出到 \`.context/plan/\` 目录，确保每一步在用户掌控之下
 6. 执行实施，将进度更新到 \`.context/todo.md\`
-7. 完成后委派 \`code-reviewer\` 做最终质量检查`)
+7. 完成后委派 \`code-reviewer\` 做最终质量检查（核心逻辑变更用 sonnet 审查）`)
 
   // 用户信息
   sections.push(`## 用户信息
@@ -198,10 +211,10 @@ Agent 工具支持 \`model\` 参数（可选值：\`sonnet\` / \`opus\` / \`haik
   }
 
   // 不确定性处理策略（根据权限模式区分）
-  if (ctx.permissionMode === 'bypassPermissions' || ctx.permissionMode === 'plan') {
+  if (ctx.permissionMode === 'bypassPermissions') {
     sections.push(`## 不确定性处理
 
-当前用户使用的是${ctx.permissionMode === 'bypassPermissions' ? '完全自动模式（所有工具调用自动批准）' : '计划模式（仅规划不执行）'}。
+当前用户使用的是完全自动模式（所有工具调用自动批准）。
 
 **⚠️ 严禁调用 AskUserQuestion 工具！**
 **当你遇到不确定的情况时：**
@@ -220,15 +233,20 @@ Agent 工具支持 \`model\` 参数（可选值：\`sonnet\` / \`opus\` / \`haik
 - 发现用户的假设或判断可能有误时，主动指出并提供依据，不要盲目附和`)
   }
 
-  // 计划模式特殊指令
+  // 计划模式指令（始终注入计划文件路径规则）
   if (ctx.permissionMode === 'plan') {
     sections.push(`## 计划模式
 
-你当前处于计划模式。规则：
+你当前处于计划模式，只能进行调研和规划，不能执行写操作。规则：
 1. 将计划文件写入当前工作目录的 \`.context/plan/\` 子目录（如 \`.context/plan/my-plan.md\`）
 2. 完成计划后，**不要立即调用 ExitPlanMode**
 3. 先向用户展示计划摘要，以及完整的计划文档的路径地址，然后等待用户确认后再退出计划模式
-4. 用户确认执行后，再调用 ExitPlanMode 退出计划模式`)
+4. 用户确认执行后，再调用 ExitPlanMode 退出计划模式
+5. 在计划模式下，你可以使用 Read、Glob、Grep、WebSearch 等只读工具进行调研，但不能使用 Edit、Bash 等写操作工具`)
+  } else {
+    sections.push(`## 计划模式文件路径
+
+当进入计划模式（EnterPlanMode）时，计划文件必须写入当前工作目录的 \`.context/plan/\` 子目录（如 \`.context/plan/my-plan.md\`）。`)
   }
 
   // 记忆系统指引（静态，利用 prompt caching）
@@ -381,32 +399,29 @@ export function buildDynamicContext(ctx: DynamicContext): string {
       }
     }
 
-    // Skills 列表（SDK plugin 机制下 skill 名称带 plugin 前缀）
+    // Skills 列表已通过 SDK plugin 机制自动发现并注册，无需手动注入
+    // 仅检查 skill-creator 是否启用，注入持续改进提示
     const skills = getWorkspaceSkills(ctx.workspaceSlug)
-    if (skills.length > 0) {
-      const pluginPrefix = `proma-workspace-${ctx.workspaceSlug}`
-      wsLines.push(`Skills（调用 Skill 工具时必须使用含前缀的完整名称，如 ${pluginPrefix}:skill-name，不可省略前缀）:`)
-      for (const skill of skills) {
-        const qualifiedName = `${pluginPrefix}:${skill.slug}`
-        const desc = skill.description ? `: ${skill.description}` : ''
-        wsLines.push(`- ${qualifiedName}${desc}`)
-      }
-
-      // 当 skill-creator 处于启用状态时，注入 Skill 持续改进提示
-      const hasSkillCreator = skills.some((s) => s.slug === 'skill-creator')
-      if (hasSkillCreator) {
-        wsLines.push('')
-        wsLines.push([
-          '<skill_improvement_hint>',
-          'skill-creator 已启用。在调用其他 Skill 前后，留意以下信号：',
-          '- 用户主动修正了某个 Skill 产出的内容（格式、流程、术语等）→ 该 Skill 可能需要更新',
-          '- 用户反复描述一类任务但没有匹配的 Skill → 可能值得创建新 Skill',
-          '- 某个 Skill 的输出持续需要大量后续调整 → 可能需要重构',
-          '发现上述信号时，先简要告知用户观察到的改进点，征得同意后再通过 skill-creator 执行创建、更新或重构。',
-          '不要在每次调用 Skill 后都提出建议——仅在确实观察到可复用的改进模式时才提出。',
-          '</skill_improvement_hint>',
-        ].join('\n'))
-      }
+    const hasSkillCreator = skills.some((s) => s.slug === 'skill-creator')
+    if (hasSkillCreator) {
+      wsLines.push([
+        '<skill_improvement_hint>',
+        'skill-creator 已启用。在整个对话过程中，留意以下信号：',
+        '',
+        '**现有 Skill 改进信号：**',
+        '- 用户主动修正了某个 Skill 产出的内容（格式、流程、术语等）→ 该 Skill 可能需要更新',
+        '- 某个 Skill 的输出持续需要大量后续调整 → 可能需要重构',
+        '',
+        '**新 Skill 创建信号：**',
+        '- 用户反复描述一类任务但没有匹配的 Skill → 可能值得创建新 Skill',
+        '- 你在对话中经历了一个有价值的多步工作流（如：探索→分析→方案选择→实施，或多轮推理决策与用户交互），且该流程具有通用性——未来其他场景大概率会复用类似模式 → 主动建议将其固化为 Skill',
+        '',
+        '**行动原则：**',
+        '- 发现信号时，简要描述你观察到的模式和复用价值，征得用户同意后通过 skill-creator 执行',
+        '- 对于主动建议新 Skill，要说清楚：观察到了什么模式、为什么觉得复用度高、固化后的 Skill 大致做什么',
+        '- 不要在每次交互后都提建议——仅在确实观察到高复用价值的模式时才提出',
+        '</skill_improvement_hint>',
+      ].join('\n'))
     }
 
     if (wsLines.length > 0) {

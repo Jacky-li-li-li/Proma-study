@@ -1,7 +1,6 @@
 import { app, BrowserWindow, Menu, screen, shell } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
-import { IPC_CHANNELS } from '@proma/shared'
 
 // 处理 EPIPE 错误：当 stdout/stderr 管道被关闭时（如 electronmon 重启），忽略写入错误
 // 这在开发环境热重载时经常发生，不影响应用功能
@@ -35,36 +34,49 @@ import { initAutoUpdater, cleanupUpdater } from './lib/updater/auto-updater'
 import { startWorkspaceWatcher, stopWorkspaceWatcher } from './lib/workspace-watcher'
 import { startChatToolsWatcher, stopChatToolsWatcher } from './lib/chat-tools-watcher'
 import { getIsQuitting, setQuitting } from './lib/app-lifecycle'
-import { feishuBridge } from './lib/feishu-bridge'
-import { getFeishuConfig } from './lib/feishu-config'
+import { registerBridge, startAllBridges, stopAllBridges } from './lib/bridge-registry'
+import { feishuBridgeManager } from './lib/feishu-bridge-manager'
+import { getFeishuMultiBotConfig } from './lib/feishu-config'
+import { dingtalkBridgeManager } from './lib/dingtalk-bridge-manager'
+import { getDingTalkMultiBotConfig } from './lib/dingtalk-config'
+import { wechatBridge } from './lib/wechat-bridge'
+import { getWeChatConfig } from './lib/wechat-config'
 import { createQuickTaskWindow, toggleQuickTaskWindow, destroyQuickTaskWindow } from './lib/quick-task-window'
 import { registerGlobalShortcut, unregisterAllGlobalShortcuts } from './lib/global-shortcut-service'
 
+// ===== Bridge 注册（新增 Bridge 只需在此添加一个 registerBridge 调用） =====
+
+registerBridge({
+  name: '飞书 BridgeManager',
+  shouldAutoStart: () => {
+    const config = getFeishuMultiBotConfig()
+    return config.bots.some((b) => b.enabled && b.appId && b.appSecret)
+  },
+  start: () => feishuBridgeManager.startAll(),
+  stop: () => feishuBridgeManager.stopAll(),
+})
+
+registerBridge({
+  name: '钉钉 BridgeManager',
+  shouldAutoStart: () => {
+    const config = getDingTalkMultiBotConfig()
+    return config.bots.some((b) => b.enabled && b.clientId && b.clientSecret)
+  },
+  start: () => dingtalkBridgeManager.startAll(),
+  stop: () => dingtalkBridgeManager.stopAll(),
+})
+
+registerBridge({
+  name: '微信 Bridge',
+  shouldAutoStart: () => {
+    const config = getWeChatConfig()
+    return !!(config.enabled && config.credentials)
+  },
+  start: () => wechatBridge.start(),
+  stop: () => wechatBridge.stop(),
+})
+
 let mainWindow: BrowserWindow | null = null
-let cspHookInstalled = false
-
-function buildCsp(isDev: boolean): string {
-  const connectSrc = isDev
-    ? "connect-src 'self' https: wss: http://localhost:5173 ws://localhost:5173 http://127.0.0.1:5173 ws://127.0.0.1:5173;"
-    : "connect-src 'self' https: wss:;"
-  const scriptSrc = isDev
-    ? "script-src 'self' 'unsafe-inline';"
-    : "script-src 'self';"
-
-  return [
-    "default-src 'self';",
-    "base-uri 'self';",
-    "object-src 'none';",
-    "frame-ancestors 'none';",
-    scriptSrc,
-    "style-src 'self' 'unsafe-inline';",
-    "img-src 'self' data: https:;",
-    "font-src 'self' data:;",
-    "worker-src 'self' blob:;",
-    "media-src 'self' data:;",
-    connectSrc,
-  ].join(' ')
-}
 
 /** 获取主窗口实例（供其他模块使用） */
 export function getMainWindow(): BrowserWindow | null {
@@ -156,22 +168,7 @@ function createWindow(): void {
   })
 
   // Load the renderer
-  // 生产力模式：即使未打包也可强制走本地文件，以避免开发模式的热重载干扰
-  const forceProdMode = process.env.PROMA_FORCE_PROD === '1'
-  const isDev = !app.isPackaged && !forceProdMode
-
-  if (!cspHookInstalled) {
-    mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
-      callback({
-        responseHeaders: {
-          ...details.responseHeaders,
-          'Content-Security-Policy': [buildCsp(isDev)],
-        },
-      })
-    })
-    cspHookInstalled = true
-  }
-
+  const isDev = !app.isPackaged
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173')
     mainWindow.webContents.openDevTools()
@@ -179,42 +176,11 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'))
   }
 
-  // 窗口就绪后最大化显示；若 ready-to-show 未触发则超时强制显示
-  let hasShownWindow = false
-  const showWindowSafely = (): void => {
-    if (!mainWindow || mainWindow.isDestroyed() || hasShownWindow) return
-    hasShownWindow = true
-    mainWindow.maximize()
-    mainWindow.show()
-    mainWindow.focus()
-  }
-
+  // 窗口就绪后最大化显示
   mainWindow.once('ready-to-show', () => {
-    showWindowSafely()
+    mainWindow?.maximize()
+    mainWindow?.show()
   })
-
-  // 某些渲染异常会导致 ready-to-show 不触发，兜底确保窗口可见
-  setTimeout(() => {
-    if (!hasShownWindow) {
-      console.warn('[窗口] ready-to-show 超时，执行强制显示')
-      showWindowSafely()
-    }
-  }, 3000)
-
-  // 若页面加载失败，仍显示窗口以便用户看到错误页面/开发者工具
-  mainWindow.webContents.on(
-    'did-fail-load',
-    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-      if (isMainFrame) {
-        console.error('[窗口] 主页面加载失败:', {
-          errorCode,
-          errorDescription,
-          validatedURL,
-        })
-        showWindowSafely()
-      }
-    },
-  )
 
   // 拦截页面内导航，外部链接用系统浏览器打开，防止 Electron 窗口被覆盖
   mainWindow.webContents.on('will-navigate', (event, url) => {
@@ -245,14 +211,6 @@ function createWindow(): void {
       }
     })
   }
-
-  // 通知渲染进程窗口全屏状态变化
-  const emitFullscreenChanged = (): void => {
-    if (!mainWindow || mainWindow.isDestroyed()) return
-    mainWindow.webContents.send(IPC_CHANNELS.ON_WINDOW_FULLSCREEN_CHANGED, mainWindow.isFullScreen())
-  }
-  mainWindow.on('enter-full-screen', emitFullscreenChanged)
-  mainWindow.on('leave-full-screen', emitFullscreenChanged)
 
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -311,13 +269,8 @@ app.whenReady().then(async () => {
   registerGlobalShortcut('quick-task', toggleQuickTaskWindow)
   registerGlobalShortcut('show-main-window', showAndFocusMainWindow)
 
-  // 飞书 Bridge 自动启动（配置启用时）
-  const feishuConfig = getFeishuConfig()
-  if (feishuConfig.enabled && feishuConfig.appId && feishuConfig.appSecret) {
-    feishuBridge.start().catch((err) => {
-      console.error('[飞书 Bridge] 自动启动失败:', err)
-    })
-  }
+  // 启动所有已注册的 Bridge（飞书/钉钉/微信等）
+  await startAllBridges()
 
   app.on('activate', () => {
     // 直接检查 mainWindow 引用，避免 getAllWindows() 包含 DevTools 等其他窗口导致误判
@@ -351,8 +304,8 @@ app.on('before-quit', () => {
   stopWorkspaceWatcher()
   // 停止 Chat 工具配置文件监听
   stopChatToolsWatcher()
-  // 停止飞书 Bridge
-  feishuBridge.stop()
+  // 停止所有 Bridge
+  stopAllBridges()
   // 注销全局快捷键
   unregisterAllGlobalShortcuts()
   // 销毁快速任务窗口

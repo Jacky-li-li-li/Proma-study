@@ -415,6 +415,8 @@ interface ChatMessagesProps {
   conversationId: string
   /** 消息列表 */
   messages: ChatMessage[]
+  /** 消息是否已完成首次加载（避免空数组初始化误触发滚动恢复） */
+  messagesLoaded?: boolean
   /** 是否正在流式生成 */
   streaming: boolean
   /** 流式累积内容 */
@@ -457,6 +459,7 @@ function EmptyState(): React.ReactElement {
 export function ChatMessages({
   conversationId,
   messages,
+  messagesLoaded = true,
   streaming,
   streamingContent,
   streamingReasoning,
@@ -533,6 +536,7 @@ export function ChatMessages({
   // 消息渲染 + StickToBottom 定位完成后淡入
   React.useEffect(() => {
     if (ready) return
+    if (!messagesLoaded) return
 
     // 空对话直接显示
     if (messages.length === 0 && !streaming) {
@@ -548,7 +552,7 @@ export function ChatMessages({
       })
     })
     return () => { cancelled = true }
-  }, [messages, streaming, ready])
+  }, [messagesLoaded, messages, streaming, ready])
 
   /** 加载更多历史消息 */
   const handleLoadMore = React.useCallback(async (): Promise<LoadMoreResult | void> => {

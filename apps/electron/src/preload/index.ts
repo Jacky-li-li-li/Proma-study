@@ -6,7 +6,7 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron'
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, MEMORY_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS } from '@proma/shared'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, MEMORY_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS } from '../types'
 import type {
   RuntimeStatus,
@@ -19,7 +19,6 @@ import type {
   FetchModelsResult,
   ConversationMeta,
   ChatMessage,
-  ModelUsageStats,
   ChatSendInput,
   GenerateTitleInput,
   StreamChunkEvent,
@@ -32,6 +31,7 @@ import type {
   FileDialogResult,
   RecentMessagesResult,
   MessageSearchResult,
+  ModelUsageStats,
   AgentSessionMeta,
   AgentMessage,
   SDKMessage,
@@ -85,9 +85,14 @@ import type {
   FeishuNotifyMode,
   FeishuNotificationSentPayload,
   FeishuUpdateBindingInput,
+  DingTalkConfig,
+  DingTalkConfigInput,
+  DingTalkBridgeState,
+  DingTalkTestResult,
+  WeChatConfig,
+  WeChatBridgeState,
   AgentQueueMessageInput,
   PendingRequestsSnapshot,
-  WorkspaceFilesChangedPayload,
 } from '@proma/shared'
 import type { UserProfile, AppSettings, QuickTaskSubmitInput, QuickTaskOpenSessionData } from '../types'
 import { QUICK_TASK_IPC_CHANNELS } from '../types'
@@ -110,12 +115,6 @@ export interface ElectronAPI {
    * @returns Git 仓库状态
    */
   getGitRepoStatus: (dirPath: string) => Promise<GitRepoStatus | null>
-
-  /** 获取当前窗口是否全屏 */
-  getWindowFullscreen: () => Promise<boolean>
-
-  /** 订阅窗口全屏状态变化事件（返回清理函数） */
-  onWindowFullscreenChanged: (callback: (isFullscreen: boolean) => void) => () => void
 
   // ===== 通用工具 =====
 
@@ -161,7 +160,6 @@ export interface ElectronAPI {
 
   /** 获取对话最近 N 条消息（分页加载） */
   getRecentMessages: (id: string, limit: number) => Promise<RecentMessagesResult>
-
   /** 获取模型用量统计（全历史） */
   getModelUsageStats: () => Promise<ModelUsageStats>
 
@@ -222,12 +220,14 @@ export interface ElectronAPI {
 
   /** 读取附件（返回 base64 字符串） */
   readAttachment: (localPath: string) => Promise<string>
-
   /** 读取消息中引用的本地图片（返回 data URL） */
   readLocalImage: (imagePath: string, basePath?: string) => Promise<string | null>
 
   /** 另存图片到用户选择的位置（原生 Save As 对话框） */
   saveImageAs: (localPath: string, defaultFilename: string) => Promise<boolean>
+
+  /** 保存应用内置资源文件到用户选择的位置（原生 Save As 对话框） */
+  saveResourceFileAs: (resourceRelativePath: string, defaultFilename: string) => Promise<boolean>
 
   /** 删除附件 */
   deleteAttachment: (localPath: string) => Promise<void>
@@ -564,7 +564,6 @@ export interface ElectronAPI {
 
   /** 设置默认提示词 */
   setDefaultPrompt: (id: string | null) => Promise<void>
-
   /** 更新 Agent 附加提示词 */
   updateAgentPromptAppend: (content: string) => Promise<void>
 
@@ -594,7 +593,7 @@ export interface ElectronAPI {
 
   // 工作区文件变化通知
   onCapabilitiesChanged: (callback: () => void) => () => void
-  onWorkspaceFilesChanged: (callback: (payload: WorkspaceFilesChangedPayload) => void) => () => void
+  onWorkspaceFilesChanged: (callback: () => void) => () => void
 
   // ===== 飞书集成 =====
 
@@ -626,6 +625,77 @@ export interface ElectronAPI {
   onFeishuStatusChanged: (callback: (state: FeishuBridgeState) => void) => () => void
   /** 订阅飞书通知已发送事件 */
   onFeishuNotificationSent: (callback: (payload: FeishuNotificationSentPayload) => void) => () => void
+
+  // --- 多 Bot v2 API ---
+
+  /** 获取多 Bot 配置 */
+  getFeishuMultiConfig: () => Promise<import('@proma/shared').FeishuMultiBotConfig>
+  /** 保存单个 Bot 配置 */
+  saveFeishuBotConfig: (input: import('@proma/shared').FeishuBotConfigInput) => Promise<import('@proma/shared').FeishuBotConfig>
+  /** 获取单个 Bot 解密后的 App Secret */
+  getDecryptedFeishuBotSecret: (botId: string) => Promise<string>
+  /** 删除 Bot */
+  removeFeishuBot: (botId: string) => Promise<boolean>
+  /** 启动单个 Bot */
+  startFeishuBot: (botId: string) => Promise<void>
+  /** 停止单个 Bot */
+  stopFeishuBot: (botId: string) => Promise<void>
+  /** 获取多 Bot 状态 */
+  getFeishuMultiStatus: () => Promise<import('@proma/shared').FeishuMultiBridgeState>
+
+  // ===== 钉钉集成 =====
+
+  /** 获取钉钉配置 */
+  getDingTalkConfig: () => Promise<DingTalkConfig>
+  /** 获取解密后的 Client Secret */
+  getDecryptedDingTalkSecret: () => Promise<string>
+  /** 保存钉钉配置（clientSecret 为明文） */
+  saveDingTalkConfig: (input: DingTalkConfigInput) => Promise<DingTalkConfig>
+  /** 测试钉钉连接 */
+  testDingTalkConnection: (clientId: string, clientSecret: string) => Promise<DingTalkTestResult>
+  /** 启动钉钉 Bridge */
+  startDingTalkBridge: () => Promise<void>
+  /** 停止钉钉 Bridge */
+  stopDingTalkBridge: () => Promise<void>
+  /** 获取钉钉 Bridge 状态 */
+  getDingTalkStatus: () => Promise<DingTalkBridgeState>
+  /** 订阅钉钉 Bridge 状态变化 */
+  onDingTalkStatusChanged: (callback: (state: DingTalkBridgeState) => void) => () => void
+
+  // --- 钉钉多 Bot v2 API ---
+
+  /** 获取多 Bot 配置 */
+  getDingTalkMultiConfig: () => Promise<import('@proma/shared').DingTalkMultiBotConfig>
+  /** 保存单个 Bot 配置 */
+  saveDingTalkBotConfig: (input: import('@proma/shared').DingTalkBotConfigInput) => Promise<import('@proma/shared').DingTalkBotConfig>
+  /** 获取单个 Bot 解密后的 Client Secret */
+  getDecryptedDingTalkBotSecret: (botId: string) => Promise<string>
+  /** 删除 Bot */
+  removeDingTalkBot: (botId: string) => Promise<boolean>
+  /** 启动单个 Bot */
+  startDingTalkBot: (botId: string) => Promise<void>
+  /** 停止单个 Bot */
+  stopDingTalkBot: (botId: string) => Promise<void>
+  /** 获取多 Bot 状态 */
+  getDingTalkMultiStatus: () => Promise<import('@proma/shared').DingTalkMultiBridgeState>
+
+  // ===== 微信集成 =====
+
+  /** 获取微信配置 */
+  getWeChatConfig: () => Promise<WeChatConfig>
+  /** 开始扫码登录 */
+  startWeChatLogin: () => Promise<void>
+  /** 登出微信 */
+  logoutWeChat: () => Promise<void>
+  /** 启动微信 Bridge（用已有凭证） */
+  startWeChatBridge: () => Promise<void>
+  /** 停止微信 Bridge */
+  stopWeChatBridge: () => Promise<void>
+  /** 获取微信 Bridge 状态 */
+  getWeChatStatus: () => Promise<WeChatBridgeState>
+  /** 订阅微信 Bridge 状态变化 */
+  onWeChatStatusChanged: (callback: (state: WeChatBridgeState) => void) => () => void
+
   /** 订阅菜单关闭标签页事件（Cmd+W 被菜单拦截后转发） */
   onMenuCloseTab: (callback: () => void) => () => void
 
@@ -654,16 +724,6 @@ const electronAPI: ElectronAPI = {
 
   getGitRepoStatus: (dirPath: string) => {
     return ipcRenderer.invoke(IPC_CHANNELS.GET_GIT_REPO_STATUS, dirPath)
-  },
-
-  getWindowFullscreen: () => {
-    return ipcRenderer.invoke(IPC_CHANNELS.GET_WINDOW_FULLSCREEN)
-  },
-
-  onWindowFullscreenChanged: (callback: (isFullscreen: boolean) => void) => {
-    const listener = (_: unknown, isFullscreen: boolean): void => callback(isFullscreen)
-    ipcRenderer.on(IPC_CHANNELS.ON_WINDOW_FULLSCREEN_CHANGED, listener)
-    return () => { ipcRenderer.removeListener(IPC_CHANNELS.ON_WINDOW_FULLSCREEN_CHANGED, listener) }
   },
 
   // 通用工具
@@ -807,6 +867,10 @@ const electronAPI: ElectronAPI = {
 
   saveImageAs: (localPath: string, defaultFilename: string) => {
     return ipcRenderer.invoke(CHAT_IPC_CHANNELS.SAVE_IMAGE_AS, localPath, defaultFilename)
+  },
+
+  saveResourceFileAs: (resourceRelativePath: string, defaultFilename: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.SAVE_RESOURCE_FILE_AS, resourceRelativePath, defaultFilename)
   },
 
   deleteAttachment: (localPath: string) => {
@@ -1139,10 +1203,8 @@ const electronAPI: ElectronAPI = {
     return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.CAPABILITIES_CHANGED, listener) }
   },
 
-  onWorkspaceFilesChanged: (callback: (payload: WorkspaceFilesChangedPayload) => void) => {
-    const listener = (_: unknown, payload?: WorkspaceFilesChangedPayload): void => {
-      callback(payload ?? { hasNewFile: false })
-    }
+  onWorkspaceFilesChanged: (callback: () => void) => {
+    const listener = (): void => callback()
     ipcRenderer.on(AGENT_IPC_CHANNELS.WORKSPACE_FILES_CHANGED, listener)
     return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.WORKSPACE_FILES_CHANGED, listener) }
   },
@@ -1354,6 +1416,134 @@ const electronAPI: ElectronAPI = {
     const listener = (_event: Electron.IpcRendererEvent, payload: FeishuNotificationSentPayload): void => callback(payload)
     ipcRenderer.on(FEISHU_IPC_CHANNELS.NOTIFICATION_SENT, listener)
     return () => { ipcRenderer.removeListener(FEISHU_IPC_CHANNELS.NOTIFICATION_SENT, listener) }
+  },
+
+  // --- 多 Bot v2 API ---
+
+  getFeishuMultiConfig: () => {
+    return ipcRenderer.invoke(FEISHU_IPC_CHANNELS.GET_MULTI_CONFIG)
+  },
+
+  saveFeishuBotConfig: (input: import('@proma/shared').FeishuBotConfigInput) => {
+    return ipcRenderer.invoke(FEISHU_IPC_CHANNELS.SAVE_BOT_CONFIG, input)
+  },
+
+  getDecryptedFeishuBotSecret: (botId: string) => {
+    return ipcRenderer.invoke(FEISHU_IPC_CHANNELS.GET_BOT_DECRYPTED_SECRET, botId)
+  },
+
+  removeFeishuBot: (botId: string) => {
+    return ipcRenderer.invoke(FEISHU_IPC_CHANNELS.REMOVE_BOT, botId)
+  },
+
+  startFeishuBot: (botId: string) => {
+    return ipcRenderer.invoke(FEISHU_IPC_CHANNELS.START_BOT, botId)
+  },
+
+  stopFeishuBot: (botId: string) => {
+    return ipcRenderer.invoke(FEISHU_IPC_CHANNELS.STOP_BOT, botId)
+  },
+
+  getFeishuMultiStatus: () => {
+    return ipcRenderer.invoke(FEISHU_IPC_CHANNELS.GET_MULTI_STATUS)
+  },
+
+  // ===== 微信集成 =====
+
+  getWeChatConfig: () => {
+    return ipcRenderer.invoke(WECHAT_IPC_CHANNELS.GET_CONFIG)
+  },
+
+  startWeChatLogin: () => {
+    return ipcRenderer.invoke(WECHAT_IPC_CHANNELS.START_LOGIN)
+  },
+
+  logoutWeChat: () => {
+    return ipcRenderer.invoke(WECHAT_IPC_CHANNELS.LOGOUT)
+  },
+
+  startWeChatBridge: () => {
+    return ipcRenderer.invoke(WECHAT_IPC_CHANNELS.START_BRIDGE)
+  },
+
+  stopWeChatBridge: () => {
+    return ipcRenderer.invoke(WECHAT_IPC_CHANNELS.STOP_BRIDGE)
+  },
+
+  getWeChatStatus: () => {
+    return ipcRenderer.invoke(WECHAT_IPC_CHANNELS.GET_STATUS)
+  },
+
+  onWeChatStatusChanged: (callback: (state: WeChatBridgeState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: WeChatBridgeState): void => callback(state)
+    ipcRenderer.on(WECHAT_IPC_CHANNELS.STATUS_CHANGED, listener)
+    return () => { ipcRenderer.removeListener(WECHAT_IPC_CHANNELS.STATUS_CHANGED, listener) }
+  },
+
+  // ===== 钉钉集成 =====
+
+  getDingTalkConfig: () => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.GET_CONFIG)
+  },
+
+  getDecryptedDingTalkSecret: () => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.GET_DECRYPTED_SECRET)
+  },
+
+  saveDingTalkConfig: (input: DingTalkConfigInput) => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.SAVE_CONFIG, input)
+  },
+
+  testDingTalkConnection: (clientId: string, clientSecret: string) => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.TEST_CONNECTION, clientId, clientSecret)
+  },
+
+  startDingTalkBridge: () => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.START_BRIDGE)
+  },
+
+  stopDingTalkBridge: () => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.STOP_BRIDGE)
+  },
+
+  getDingTalkStatus: () => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.GET_STATUS)
+  },
+
+  onDingTalkStatusChanged: (callback: (state: DingTalkBridgeState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: DingTalkBridgeState): void => callback(state)
+    ipcRenderer.on(DINGTALK_IPC_CHANNELS.STATUS_CHANGED, listener)
+    return () => { ipcRenderer.removeListener(DINGTALK_IPC_CHANNELS.STATUS_CHANGED, listener) }
+  },
+
+  // --- 钉钉多 Bot v2 API ---
+
+  getDingTalkMultiConfig: () => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.GET_MULTI_CONFIG)
+  },
+
+  saveDingTalkBotConfig: (input: import('@proma/shared').DingTalkBotConfigInput) => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.SAVE_BOT_CONFIG, input)
+  },
+
+  getDecryptedDingTalkBotSecret: (botId: string) => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.GET_BOT_DECRYPTED_SECRET, botId)
+  },
+
+  removeDingTalkBot: (botId: string) => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.REMOVE_BOT, botId)
+  },
+
+  startDingTalkBot: (botId: string) => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.START_BOT, botId)
+  },
+
+  stopDingTalkBot: (botId: string) => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.STOP_BOT, botId)
+  },
+
+  getDingTalkMultiStatus: () => {
+    return ipcRenderer.invoke(DINGTALK_IPC_CHANNELS.GET_MULTI_STATUS)
   },
 
   onMenuCloseTab: (callback: () => void) => {
