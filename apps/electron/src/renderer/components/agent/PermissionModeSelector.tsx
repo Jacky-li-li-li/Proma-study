@@ -56,31 +56,48 @@ export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProp
     return ws?.slug ?? null
   }, [currentWorkspaceId, workspaces])
 
-  // 加载工作区权限模式（仅值变化时更新，避免切换会话时抖动）
+  // 加载工作区权限模式：
+  // 1) 更新默认模式，供新会话继承
+  // 2) 若当前会话仅继承了旧默认值，则同步到工作区保存值，避免初始化竞态
   React.useEffect(() => {
     if (!workspaceSlug) return
 
+    let canceled = false
+    const initialDefaultMode = defaultMode
+
     window.electronAPI.getPermissionMode(workspaceSlug)
       .then((savedMode) => {
-        if (savedMode !== defaultMode) setDefaultMode(savedMode)
+        if (canceled) return
+        if (savedMode !== initialDefaultMode) {
+          setDefaultMode(savedMode)
+        }
+        setModeMap((prev: Map<string, PromaPermissionMode>) => {
+          const current = prev.get(sessionId)
+          // 仅在“尚未初始化”或“仍是旧默认值”时回填，避免覆盖用户显式切换
+          if (current !== undefined && current !== initialDefaultMode) return prev
+          const next = new Map(prev)
+          next.set(sessionId, savedMode)
+          return next
+        })
       })
       .catch((error) => {
         console.error('[PermissionModeSelector] 加载权限模式失败:', error)
       })
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在 workspaceSlug 变化时重新加载
-  }, [workspaceSlug])
+
+    return () => {
+      canceled = true
+    }
+  }, [workspaceSlug, sessionId, defaultMode, setDefaultMode, setModeMap])
 
   // 初始化：如果当前 session 不在 Map 中，从默认值写入，确保隔离
   React.useEffect(() => {
-    if (!modeMap.has(sessionId)) {
-      setModeMap((prev: Map<string, PromaPermissionMode>) => {
-        if (prev.has(sessionId)) return prev
-        const next = new Map(prev)
-        next.set(sessionId, defaultMode)
-        return next
-      })
-    }
-  }, [sessionId])
+    setModeMap((prev: Map<string, PromaPermissionMode>) => {
+      if (prev.has(sessionId)) return prev
+      const next = new Map(prev)
+      next.set(sessionId, defaultMode)
+      return next
+    })
+  }, [sessionId, defaultMode, setModeMap])
 
   /** 循环切换模式 */
   const cycleMode = React.useCallback(async () => {
@@ -94,6 +111,8 @@ export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProp
       next.set(sessionId, nextMode)
       return next
     })
+    // 同步更新默认模式，供后续新会话继承
+    setDefaultMode(nextMode)
 
     // 持久化到工作区配置
     if (workspaceSlug) {
@@ -103,7 +122,7 @@ export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProp
         console.error('[PermissionModeSelector] 保存权限模式失败:', error)
       }
     }
-  }, [mode, sessionId, workspaceSlug, setModeMap])
+  }, [mode, sessionId, workspaceSlug, setModeMap, setDefaultMode])
 
   const config = MODE_CONFIG[mode]
   const Icon = config.icon

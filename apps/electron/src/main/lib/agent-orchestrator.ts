@@ -16,7 +16,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve, relative, isAbsolute } from 'node:path'
 import { existsSync, mkdirSync, symlinkSync, readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -1026,6 +1026,20 @@ export class AgentOrchestrator {
         'AskUserQuestion',
       ])
 
+      /** 仅允许写入当前会话工作目录下的 .context/plan/ */
+      const isAllowedPlanWritePath = (filePath: string): boolean => {
+        if (!filePath.trim()) return false
+        try {
+          const cwd = agentCwd ?? homedir()
+          const planDir = resolve(cwd, '.context', 'plan')
+          const targetPath = resolve(cwd, filePath)
+          const rel = relative(planDir, targetPath)
+          return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+        } catch {
+          return false
+        }
+      }
+
       /** Plan 模式是否已被 Agent 进入（初始 plan 模式时天然为 true，其他模式需 EnterPlanMode 触发） */
       let planModeEntered = initialPermissionMode === 'plan'
 
@@ -1081,7 +1095,7 @@ export class AgentOrchestrator {
             // 允许 Write 到 .context/plan/ 目录（计划文件输出）
             if (toolName === 'Write') {
               const filePath = typeof input.file_path === 'string' ? input.file_path : ''
-              if (filePath.includes('.context/plan/')) {
+              if (isAllowedPlanWritePath(filePath)) {
                 return { behavior: 'allow' as const, updatedInput: input }
               }
             }
