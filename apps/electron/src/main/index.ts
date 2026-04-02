@@ -1,0 +1,362 @@
+import { app, BrowserWindow, Menu, screen, shell } from 'electron'
+import { join } from 'path'
+import { existsSync } from 'fs'
+import { IPC_CHANNELS } from '@proma/shared'
+
+// 处理 EPIPE 错误：当 stdout/stderr 管道被关闭时（如 electronmon 重启），忽略写入错误
+// 这在开发环境热重载时经常发生，不影响应用功能
+process.stdout?.on?.('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EPIPE') return
+  throw err
+})
+process.stderr?.on?.('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EPIPE') return
+  throw err
+})
+
+// 清理本地环境中的 ANTHROPIC_* 变量，防止干扰应用的认证流程
+// Electron 桌面应用通过渠道系统管理 API Key，不应受终端环境变量影响
+// 注意：此操作必须在 initializeRuntime()（loadShellEnv）之前执行
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('ANTHROPIC_')) {
+    delete process.env[key]
+  }
+}
+
+import { createApplicationMenu } from './menu'
+import { registerIpcHandlers } from './ipc'
+import { createTray, destroyTray } from './tray'
+import { initializeRuntime } from './lib/runtime-init'
+import { seedDefaultSkills } from './lib/config-paths'
+import { upgradeDefaultSkillsInWorkspaces } from './lib/agent-workspace-manager'
+import { stopAllAgents } from './lib/agent-service'
+import { stopAllGenerations } from './lib/chat-service'
+import { initAutoUpdater, cleanupUpdater } from './lib/updater/auto-updater'
+import { startWorkspaceWatcher, stopWorkspaceWatcher } from './lib/workspace-watcher'
+import { startChatToolsWatcher, stopChatToolsWatcher } from './lib/chat-tools-watcher'
+import { getIsQuitting, setQuitting } from './lib/app-lifecycle'
+import { feishuBridge } from './lib/feishu-bridge'
+import { getFeishuConfig } from './lib/feishu-config'
+import { createQuickTaskWindow, toggleQuickTaskWindow, destroyQuickTaskWindow } from './lib/quick-task-window'
+import { registerGlobalShortcut, unregisterAllGlobalShortcuts } from './lib/global-shortcut-service'
+
+let mainWindow: BrowserWindow | null = null
+let cspHookInstalled = false
+
+function buildCsp(isDev: boolean): string {
+  const connectSrc = isDev
+    ? "connect-src 'self' https: wss: http://localhost:5173 ws://localhost:5173 http://127.0.0.1:5173 ws://127.0.0.1:5173;"
+    : "connect-src 'self' https: wss:;"
+  const scriptSrc = isDev
+    ? "script-src 'self' 'unsafe-inline';"
+    : "script-src 'self';"
+
+  return [
+    "default-src 'self';",
+    "base-uri 'self';",
+    "object-src 'none';",
+    "frame-ancestors 'none';",
+    scriptSrc,
+    "style-src 'self' 'unsafe-inline';",
+    "img-src 'self' data: https:;",
+    "font-src 'self' data:;",
+    "worker-src 'self' blob:;",
+    "media-src 'self' data:;",
+    connectSrc,
+  ].join(' ')
+}
+
+/** 获取主窗口实例（供其他模块使用） */
+export function getMainWindow(): BrowserWindow | null {
+  return mainWindow
+}
+
+/**
+ * 检查窗口是否在可用显示器范围内
+ * 处理外接显示器断开后窗口位于不可见区域的情况
+ */
+function ensureWindowOnScreen(win: BrowserWindow): void {
+  const bounds = win.getBounds()
+  const displays = screen.getAllDisplays()
+  // 检查窗口中心点是否在任一显示器范围内
+  const centerX = bounds.x + bounds.width / 2
+  const centerY = bounds.y + bounds.height / 2
+  const isOnScreen = displays.some((display) => {
+    const { x, y, width, height } = display.workArea
+    return centerX >= x && centerX <= x + width && centerY >= y && centerY <= y + height
+  })
+  if (!isOnScreen) {
+    // 窗口不在任何屏幕内，移动到主显示器居中位置
+    const primary = screen.getPrimaryDisplay()
+    const { x, y, width, height } = primary.workArea
+    win.setBounds({
+      x: x + Math.round((width - bounds.width) / 2),
+      y: y + Math.round((height - bounds.height) / 2),
+      width: bounds.width,
+      height: bounds.height,
+    })
+    console.log('[窗口] 窗口已重新定位到主显示器')
+  }
+}
+
+/** 显示并聚焦主窗口，确保窗口在可见区域；若窗口已销毁则重新创建 */
+function showAndFocusMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow()
+    return
+  }
+  ensureWindowOnScreen(mainWindow)
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore()
+  }
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+/**
+ * Get the appropriate app icon path for the current platform
+ */
+function getIconPath(): string {
+  // resources 在 build:resources 阶段被复制到 dist/ 下，与 main.cjs 同级
+  const resourcesDir = join(__dirname, 'resources')
+
+  if (process.platform === 'darwin') {
+    return join(resourcesDir, 'icon.icns')
+  } else if (process.platform === 'win32') {
+    return join(resourcesDir, 'icon.ico')
+  } else {
+    return join(resourcesDir, 'icon.png')
+  }
+}
+
+function createWindow(): void {
+  const iconPath = getIconPath()
+  const iconExists = existsSync(iconPath)
+
+  if (!iconExists) {
+    console.warn('App icon not found at:', iconPath)
+  }
+
+  mainWindow = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 800,
+    minHeight: 600,
+    icon: iconExists ? iconPath : undefined,
+    show: false, // Don't show until ready
+    webPreferences: {
+      preload: join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    titleBarStyle: 'hiddenInset', // macOS style
+    trafficLightPosition: { x: 18, y: 18 },
+    vibrancy: 'under-window', // macOS glass effect
+    visualEffectState: 'active',
+  })
+
+  // Load the renderer
+  // 生产力模式：即使未打包也可强制走本地文件，以避免开发模式的热重载干扰
+  const forceProdMode = process.env.PROMA_FORCE_PROD === '1'
+  const isDev = !app.isPackaged && !forceProdMode
+
+  if (!cspHookInstalled) {
+    mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          'Content-Security-Policy': [buildCsp(isDev)],
+        },
+      })
+    })
+    cspHookInstalled = true
+  }
+
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:5173')
+    mainWindow.webContents.openDevTools()
+  } else {
+    mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'))
+  }
+
+  // 窗口就绪后最大化显示；若 ready-to-show 未触发则超时强制显示
+  let hasShownWindow = false
+  const showWindowSafely = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed() || hasShownWindow) return
+    hasShownWindow = true
+    mainWindow.maximize()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+
+  mainWindow.once('ready-to-show', () => {
+    showWindowSafely()
+  })
+
+  // 某些渲染异常会导致 ready-to-show 不触发，兜底确保窗口可见
+  setTimeout(() => {
+    if (!hasShownWindow) {
+      console.warn('[窗口] ready-to-show 超时，执行强制显示')
+      showWindowSafely()
+    }
+  }, 3000)
+
+  // 若页面加载失败，仍显示窗口以便用户看到错误页面/开发者工具
+  mainWindow.webContents.on(
+    'did-fail-load',
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (isMainFrame) {
+        console.error('[窗口] 主页面加载失败:', {
+          errorCode,
+          errorDescription,
+          validatedURL,
+        })
+        showWindowSafely()
+      }
+    },
+  )
+
+  // 拦截页面内导航，外部链接用系统浏览器打开，防止 Electron 窗口被覆盖
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    // 允许开发模式下的 Vite HMR 热重载
+    if (isDev && url.startsWith('http://localhost:')) return
+    event.preventDefault()
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url)
+    }
+  })
+
+  // 拦截 window.open / target="_blank" 链接
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url)
+    }
+    return { action: 'deny' }
+  })
+
+  // macOS: 点击关闭按钮时隐藏窗口+应用，而不是退出
+  // 同时隐藏应用（类似 Cmd+H），确保点击 Dock 图标时 macOS 能正确触发 activate 事件
+  if (process.platform === 'darwin') {
+    mainWindow.on('close', (event) => {
+      if (!getIsQuitting()) {
+        event.preventDefault()
+        mainWindow?.hide()
+        app.hide()
+      }
+    })
+  }
+
+  // 通知渲染进程窗口全屏状态变化
+  const emitFullscreenChanged = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.webContents.send(IPC_CHANNELS.ON_WINDOW_FULLSCREEN_CHANGED, mainWindow.isFullScreen())
+  }
+  mainWindow.on('enter-full-screen', emitFullscreenChanged)
+  mainWindow.on('leave-full-screen', emitFullscreenChanged)
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+}
+
+app.whenReady().then(async () => {
+  // 初始化运行时环境（Shell 环境 + Bun + Git 检测）
+  // 必须在其他初始化之前执行，确保环境变量正确加载
+  await initializeRuntime()
+
+  // 同步默认 Skills 模板到 ~/.proma/default-skills/
+  seedDefaultSkills()
+
+  // 升级所有工作区中版本过旧的默认 Skills
+  upgradeDefaultSkillsInWorkspaces()
+
+  // Create application menu
+  const menu = createApplicationMenu()
+  Menu.setApplicationMenu(menu)
+
+  // Register IPC handlers
+  registerIpcHandlers()
+
+  // Set dock icon on macOS (required for dev mode, bundled apps use Info.plist)
+  if (process.platform === 'darwin' && app.dock) {
+    const dockIconPath = join(__dirname, 'resources/icon.png')
+    if (existsSync(dockIconPath)) {
+      app.dock.setIcon(dockIconPath)
+    }
+  }
+
+  // Create system tray icon
+  createTray()
+
+  // Create main window (will be shown when ready)
+  createWindow()
+
+  // 启动工作区文件监听（Agent MCP/Skills + 文件浏览器自动刷新）
+  if (mainWindow) {
+    startWorkspaceWatcher(mainWindow)
+  }
+
+  // 启动 Chat 工具配置文件监听（Agent 创建工具后自动通知渲染进程）
+  startChatToolsWatcher()
+
+  // 生产环境下初始化自动更新
+  if (app.isPackaged && mainWindow) {
+    initAutoUpdater(mainWindow)
+  }
+
+  // 预创建快速任务窗口（隐藏状态，首次唤起秒开）
+  createQuickTaskWindow()
+
+  // 注册全局快捷键
+  registerGlobalShortcut('quick-task', toggleQuickTaskWindow)
+  registerGlobalShortcut('show-main-window', showAndFocusMainWindow)
+
+  // 飞书 Bridge 自动启动（配置启用时）
+  const feishuConfig = getFeishuConfig()
+  if (feishuConfig.enabled && feishuConfig.appId && feishuConfig.appSecret) {
+    feishuBridge.start().catch((err) => {
+      console.error('[飞书 Bridge] 自动启动失败:', err)
+    })
+  }
+
+  app.on('activate', () => {
+    // 直接检查 mainWindow 引用，避免 getAllWindows() 包含 DevTools 等其他窗口导致误判
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createWindow()
+    } else {
+      // 窗口已存在但可能被隐藏（macOS 关闭按钮 = hide），重新显示
+      showAndFocusMainWindow()
+    }
+  })
+})
+
+app.on('window-all-closed', () => {
+  // 非 macOS：关闭所有窗口时退出应用
+  // macOS：保持应用运行（可通过 tray 或 Dock 重新打开）
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
+})
+
+app.on('before-quit', () => {
+  // 标记正在退出，让 close 事件不再阻止关闭
+  setQuitting()
+
+  // 中止所有活跃的 Agent 和 Chat 子进程
+  stopAllAgents()
+  stopAllGenerations()
+  // 清理更新器定时器
+  cleanupUpdater()
+  // 停止工作区文件监听
+  stopWorkspaceWatcher()
+  // 停止 Chat 工具配置文件监听
+  stopChatToolsWatcher()
+  // 停止飞书 Bridge
+  feishuBridge.stop()
+  // 注销全局快捷键
+  unregisterAllGlobalShortcuts()
+  // 销毁快速任务窗口
+  destroyQuickTaskWindow()
+  // Clean up system tray before quitting
+  destroyTray()
+})

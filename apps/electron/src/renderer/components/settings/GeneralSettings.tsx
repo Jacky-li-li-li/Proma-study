@@ -1,0 +1,351 @@
+/**
+ * GeneralSettings - 通用设置页
+ *
+ * 顶部：用户档案编辑（头像 + 用户名）
+ * 下方：语言等通用设置
+ */
+
+import * as React from 'react'
+import { useAtom } from 'jotai'
+import { Camera, ImagePlus, Circle, CheckCircle2 } from 'lucide-react'
+import Picker from '@emoji-mart/react'
+import data from '@emoji-mart/data'
+import {
+  SettingsSection,
+  SettingsCard,
+  SettingsRow,
+  SettingsToggle,
+} from './primitives'
+import { Popover, PopoverTrigger, PopoverContent } from '../ui/popover'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select'
+import { UserAvatar } from '../chat/UserAvatar'
+import { userProfileAtom } from '@/atoms/user-profile'
+import {
+  notificationsEnabledAtom,
+  updateNotificationsEnabled,
+} from '@/atoms/notifications'
+import {
+  conversationDisplayModeAtom,
+  updateConversationDisplayMode,
+} from '@/atoms/conversation-display-mode'
+import { cn } from '@/lib/utils'
+import { DEFAULT_CONVERSATION_DISPLAY_MODE } from '../../../types'
+import type { ConversationDisplayMode } from '../../../types'
+
+/** emoji-mart 选择回调的 emoji 对象类型 */
+interface EmojiMartEmoji {
+  id: string
+  name: string
+  native: string
+  unified: string
+  keywords: string[]
+  shortcodes: string
+}
+
+interface DisplayModeOption {
+  value: ConversationDisplayMode
+  label: string
+}
+
+const DISPLAY_MODE_OPTIONS: DisplayModeOption[] = [
+  { value: 'left', label: '消息气泡左对齐' },
+  { value: 'distributed', label: '消息气泡左右分布' },
+]
+
+export function GeneralSettings(): React.ReactElement {
+  const [userProfile, setUserProfile] = useAtom(userProfileAtom)
+  const [notificationsEnabled, setNotificationsEnabled] = useAtom(notificationsEnabledAtom)
+  const [conversationDisplayMode, setConversationDisplayMode] = useAtom(conversationDisplayModeAtom)
+  const [isEditingName, setIsEditingName] = React.useState(false)
+  const [nameInput, setNameInput] = React.useState(userProfile.userName)
+  const [showEmojiPicker, setShowEmojiPicker] = React.useState(false)
+  const [archiveAfterDays, setArchiveAfterDays] = React.useState<number>(7)
+  const fileInputRef = React.useRef<HTMLInputElement>(null)
+
+  // 加载归档天数设置
+  React.useEffect(() => {
+    window.electronAPI.getSettings().then((settings) => {
+      setArchiveAfterDays(settings.archiveAfterDays ?? 7)
+      setConversationDisplayMode(settings.conversationDisplayMode ?? DEFAULT_CONVERSATION_DISPLAY_MODE)
+    }).catch(console.error)
+  }, [setConversationDisplayMode])
+
+  /** 更新归档天数 */
+  const handleArchiveDaysChange = async (value: string): Promise<void> => {
+    const days = parseInt(value, 10)
+    setArchiveAfterDays(days)
+    try {
+      await window.electronAPI.updateSettings({ archiveAfterDays: days })
+    } catch (error) {
+      console.error('[通用设置] 更新归档天数失败:', error)
+    }
+  }
+
+  /** 更新会话显示模式 */
+  const handleConversationDisplayModeChange = async (mode: ConversationDisplayMode): Promise<void> => {
+    setConversationDisplayMode(mode)
+    await updateConversationDisplayMode(mode)
+  }
+
+  /** 更新头像 */
+  const handleAvatarChange = async (avatar: string): Promise<void> => {
+    try {
+      const updated = await window.electronAPI.updateUserProfile({ avatar })
+      setUserProfile(updated)
+      setShowEmojiPicker(false)
+    } catch (error) {
+      console.error('[通用设置] 更新头像失败:', error)
+    }
+  }
+
+  /** 上传图片作为头像 */
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = async () => {
+      const dataUrl = reader.result as string
+      await handleAvatarChange(dataUrl)
+    }
+    reader.readAsDataURL(file)
+    e.target.value = ''
+  }
+
+  /** 保存用户名 */
+  const handleSaveName = async (): Promise<void> => {
+    const trimmed = nameInput.trim()
+    if (!trimmed) return
+
+    try {
+      const updated = await window.electronAPI.updateUserProfile({ userName: trimmed })
+      setUserProfile(updated)
+      setIsEditingName(false)
+    } catch (error) {
+      console.error('[通用设置] 更新用户名失败:', error)
+    }
+  }
+
+  /** 用户名编辑键盘事件 */
+  const handleNameKeyDown = (e: React.KeyboardEvent): void => {
+    if (e.key === 'Enter') {
+      handleSaveName()
+    } else if (e.key === 'Escape') {
+      setNameInput(userProfile.userName)
+      setIsEditingName(false)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* 用户档案区域 */}
+      <SettingsSection
+        title="用户档案"
+        description="设置你的头像和显示名称"
+      >
+        <SettingsCard>
+          <div className="flex items-center gap-5 px-4 py-4">
+            {/* 头像 + Popover emoji 选择器 */}
+            <Popover open={showEmojiPicker} onOpenChange={setShowEmojiPicker}>
+              <PopoverTrigger asChild>
+                <div className="relative group/avatar cursor-pointer">
+                  <UserAvatar avatar={userProfile.avatar} size={64} />
+                  {/* 编辑覆盖层 */}
+                  <div
+                    className={cn(
+                      'absolute inset-0 rounded-[20%] flex items-center justify-center',
+                      'bg-black/40 opacity-0 group-hover/avatar:opacity-100 transition-opacity'
+                    )}
+                  >
+                    <Camera className="size-5 text-white" />
+                  </div>
+                </div>
+              </PopoverTrigger>
+              <PopoverContent
+                side="right"
+                align="start"
+                sideOffset={12}
+                className="w-auto p-0 border-none shadow-xl"
+              >
+                <Picker
+                  data={data}
+                  onEmojiSelect={(emoji: EmojiMartEmoji) => handleAvatarChange(emoji.native)}
+                  locale="zh"
+                  theme="auto"
+                  previewPosition="none"
+                  skinTonePosition="search"
+                  perLine={8}
+                />
+                {/* 上传自定义图片 */}
+                <div className="px-3 p-2">
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className={cn(
+                      'w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-[13px]',
+                      'text-foreground/60 hover:text-foreground hover:bg-foreground/[0.06] transition-colors'
+                    )}
+                  >
+                    <ImagePlus className="size-4" />
+                    上传自定义图片
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/gif,image/webp"
+                    className="hidden"
+                    onChange={handleImageUpload}
+                  />
+                </div>
+              </PopoverContent>
+            </Popover>
+
+            {/* 用户名 */}
+            <div className="flex-1 min-w-0">
+              {isEditingName ? (
+                <input
+                  type="text"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  onBlur={handleSaveName}
+                  onKeyDown={handleNameKeyDown}
+                  maxLength={30}
+                  autoFocus
+                  className={cn(
+                    'text-lg font-semibold text-foreground bg-transparent border-b-2 border-primary',
+                    'outline-none w-full max-w-[200px] pb-0.5'
+                  )}
+                />
+              ) : (
+                <button
+                  onClick={() => {
+                    setNameInput(userProfile.userName)
+                    setIsEditingName(true)
+                  }}
+                  className="text-lg font-semibold text-foreground hover:text-primary transition-colors text-left"
+                >
+                  {userProfile.userName}
+                </button>
+              )}
+              <p className="text-[12px] text-foreground/40 mt-0.5">
+                点击头像更换，点击名字编辑
+              </p>
+            </div>
+          </div>
+        </SettingsCard>
+      </SettingsSection>
+
+      {/* 通用设置 */}
+      <SettingsSection
+        title="通用设置"
+        description="应用的基本配置"
+      >
+        <SettingsCard>
+          <SettingsRow
+            label="语言"
+            description="更多语言支持即将推出"
+          >
+            <span className="text-[13px] text-foreground/40">简体中文</span>
+          </SettingsRow>
+          <SettingsToggle
+            label="桌面通知"
+            description="Agent 完成任务或需要操作时发送通知"
+            checked={notificationsEnabled}
+            onCheckedChange={(checked) => {
+              setNotificationsEnabled(checked)
+              updateNotificationsEnabled(checked)
+            }}
+          />
+          <SettingsRow
+            label="自动归档"
+            description="超过指定天数未更新的对话/会话将自动归档（置顶除外）"
+          >
+            <Select value={String(archiveAfterDays)} onValueChange={handleArchiveDaysChange}>
+              <SelectTrigger className="w-[120px] h-8 text-[13px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">禁用</SelectItem>
+                <SelectItem value="7">7 天</SelectItem>
+                <SelectItem value="14">14 天</SelectItem>
+                <SelectItem value="30">30 天</SelectItem>
+                <SelectItem value="60">60 天</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingsRow>
+        </SettingsCard>
+        <SettingsCard divided={false}>
+          <div className="px-4 py-4">
+            <div className="mb-3">
+              <div className="text-sm font-medium text-foreground">会话显示模式</div>
+              <div className="text-sm text-muted-foreground mt-0.5">切换会话中的消息气泡布局</div>
+            </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {DISPLAY_MODE_OPTIONS.map((option) => {
+                const selected = conversationDisplayMode === option.value
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => { void handleConversationDisplayModeChange(option.value) }}
+                    className={cn(
+                      'rounded-xl border border-border/60 overflow-hidden text-left transition-colors',
+                      selected && 'border-primary bg-primary/[0.06]'
+                    )}
+                  >
+                    <div className="h-28 px-4 py-3 border-b border-border/60 bg-muted/30">
+                      {option.value === 'left' ? (
+                        <div className="flex flex-col gap-2.5">
+                          <div className="flex items-center gap-2">
+                            <div className="size-6 rounded-full bg-muted" />
+                            <div className="h-4 w-36 rounded-md bg-muted" />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="size-6 rounded-full bg-muted" />
+                            <div className="h-4 w-44 rounded-md bg-blue-200/80 dark:bg-blue-400/25" />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="size-6 rounded-full bg-muted" />
+                            <div className="h-4 w-28 rounded-md bg-muted" />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-2.5">
+                          <div className="flex items-center gap-2">
+                            <div className="size-6 rounded-full bg-muted" />
+                            <div className="h-4 w-36 rounded-md bg-muted" />
+                          </div>
+                          <div className="flex items-center justify-end gap-2">
+                            <div className="h-4 w-44 rounded-md bg-blue-200/80 dark:bg-blue-400/25" />
+                            <div className="size-6 rounded-full bg-muted" />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="size-6 rounded-full bg-muted" />
+                            <div className="h-4 w-28 rounded-md bg-muted" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 px-3.5 py-2.5">
+                      {selected ? (
+                        <CheckCircle2 className="size-5 text-primary shrink-0" />
+                      ) : (
+                        <Circle className="size-5 text-muted-foreground shrink-0" />
+                      )}
+                      <span className="text-sm text-foreground">{option.label}</span>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </SettingsCard>
+      </SettingsSection>
+    </div>
+  )
+}

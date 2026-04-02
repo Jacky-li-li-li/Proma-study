@@ -1,0 +1,909 @@
+/**
+ * AI Elements - 消息组件原语
+ *
+ * 简化迁移自 proma-frontend 的 ai-elements/message.tsx，
+ * 保留核心消息展示组件，适配 Electron + Jotai 架构。
+ *
+ * 包含：
+ * - Message — 根容器，`from` 属性区分 user/assistant
+ * - MessageHeader — 头像 + 模型名
+ * - MessageContent — 内容区域
+ * - MessageActions — 操作按钮容器
+ * - MessageAction — 单个操作按钮（可选 Tooltip）
+ * - MessageResponse — react-markdown 渲染
+ * - UserMessageContent — 长文本自动折叠
+ * - MessageLoading — 3 个弹跳点加载动画
+ * - MessageStopped — "已停止生成" 状态标记
+ * - StreamingIndicator — 流式呼吸脉冲点
+ */
+
+import * as React from 'react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import { ChevronDown, ChevronUp, Paperclip, FileText, Sparkles, Server, Download } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import { LoadingIndicator } from '@/components/ui/loading-indicator'
+import { CodeBlock, MermaidBlock } from '@proma/ui'
+import { FilePathChip, isAbsoluteFilePath, isRelativeFilePath } from './file-path-chip'
+import { estimateTextLayout } from '@/lib/pretext-metrics'
+import type { HTMLAttributes, ComponentProps, ReactNode } from 'react'
+import type { FileAttachment } from '@proma/shared'
+
+// ===== Message 根容器 =====
+
+type MessageRole = 'user' | 'assistant' | 'system'
+
+interface MessageProps extends HTMLAttributes<HTMLDivElement> {
+  /** 消息发送者角色 */
+  from: MessageRole
+}
+
+/** 消息根容器，user 自动右对齐 */
+export function Message({ className, from, ...props }: MessageProps): React.ReactElement {
+  return (
+    <div
+      className={cn(
+        'group flex w-full flex-col gap-0.5 rounded-[10px] px-2.5 py-2.5',
+        from === 'user' ? 'is-user' : 'is-assistant',
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+// ===== MessageHeader 头像 + 模型名 =====
+
+interface MessageHeaderProps extends HTMLAttributes<HTMLDivElement> {
+  /** 模型名称 */
+  model?: string
+  /** 头像元素 */
+  logo?: ReactNode
+  /** 消息时间戳 */
+  time?: string
+}
+
+/** 消息头部（user 时自动隐藏） */
+export function MessageHeader({
+  model,
+  logo,
+  time,
+  className,
+  children,
+  ...props
+}: MessageHeaderProps): React.ReactElement {
+  return (
+    <div
+      className={cn(
+        'flex items-start gap-2.5 mb-2.5',
+        'group-[.is-user]:hidden',
+        className
+      )}
+      {...props}
+    >
+      {logo && (
+        <div className="flex size-[35px] shrink-0 items-center justify-center overflow-hidden rounded-[25%]">
+          {logo}
+        </div>
+      )}
+      <div className="flex flex-col justify-between h-[35px]">
+        {model && <span className="text-sm font-semibold text-foreground/60 leading-none">{model}</span>}
+        {time && <span className="text-[10px] text-foreground/[0.38] leading-none">{time}</span>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+// ===== MessageContent 内容区域 =====
+
+type MessageContentProps = HTMLAttributes<HTMLDivElement>
+
+/**
+ * 消息内容区域
+ * - user 消息：pl-[46px] 与头像对齐 + 浅色气泡背景
+ * - assistant 消息：pl-[46px] 与头像对齐
+ */
+export function MessageContent({
+  children,
+  className,
+  ...props
+}: MessageContentProps): React.ReactElement {
+  return (
+    <div
+      className={cn(
+        'flex w-full max-w-full min-w-0 flex-col gap-2 overflow-hidden pl-[46px]',
+        'group-[.is-user]:text-foreground',
+        'group-[.is-assistant]:text-foreground',
+        className
+      )}
+      {...props}
+    >
+      {children}
+    </div>
+  )
+}
+
+// ===== MessageActions 操作按钮容器 =====
+
+type MessageActionsProps = ComponentProps<'div'>
+
+/** 操作按钮容器（复制、删除等），默认显示淡色，hover 时加深 */
+export function MessageActions({
+  className,
+  children,
+  ...props
+}: MessageActionsProps): React.ReactElement {
+  return (
+    <div
+      className={cn(
+        'flex items-center gap-2.5 text-muted-foreground/60 hover:text-muted-foreground/90 transition-colors duration-200',
+        className
+      )}
+      {...props}
+    >
+      {children}
+    </div>
+  )
+}
+
+// ===== MessageAction 单个操作按钮 =====
+
+interface MessageActionProps extends ComponentProps<typeof Button> {
+  /** 悬停提示文字 */
+  tooltip?: string
+  /** 无障碍标签 */
+  label?: string
+}
+
+/** 单个操作按钮（含可选 Tooltip 包装） */
+export function MessageAction({
+  tooltip,
+  children,
+  label,
+  variant = 'ghost',
+  size = 'icon-sm',
+  ...props
+}: MessageActionProps): React.ReactElement {
+  const button = (
+    <Button size={size} type="button" variant={variant} {...props}>
+      {children}
+      <span className="sr-only">{label || tooltip}</span>
+    </Button>
+  )
+
+  if (tooltip) {
+    return (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>{button}</TooltipTrigger>
+          <TooltipContent>
+            <p>{tooltip}</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    )
+  }
+
+  return button
+}
+
+// ===== MessageResponse Markdown 渲染 =====
+
+interface MessageResponseProps {
+  /** Markdown 内容 */
+  children: string
+  className?: string
+  /** 基础目录路径，用于解析相对文件路径（如 Agent 会话工作目录） */
+  basePath?: string
+}
+
+/** 稳定引用的插件数组，避免 react-markdown 每帧重建插件管线 */
+const REMARK_PLUGINS = [remarkGfm, remarkMath]
+const REHYPE_PLUGINS = [rehypeKatex]
+
+// ===== Memo'd Markdown 子组件（稳定引用，避免 react-markdown 每帧重建组件映射） =====
+
+/** 外部链接渲染器 */
+const MarkdownLink = React.memo(function MarkdownLink({
+  href,
+  children: linkChildren,
+  ...linkProps
+}: React.AnchorHTMLAttributes<HTMLAnchorElement>): React.ReactElement {
+  return (
+    <a
+      {...linkProps}
+      href={href}
+      onClick={(e) => {
+        e.preventDefault()
+        if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+          window.electronAPI.openExternal(href)
+        }
+      }}
+      title={href}
+    >
+      {linkChildren}
+    </a>
+  )
+})
+
+/** 递归提取纯文本（children 可能是字符串数组） */
+function extractText(node: React.ReactNode): string {
+  if (typeof node === 'string') return node
+  if (typeof node === 'number') return String(node)
+  if (!node) return ''
+  if (Array.isArray(node)) return node.map(extractText).join('')
+  if (React.isValidElement(node)) {
+    return extractText((node.props as { children?: React.ReactNode }).children)
+  }
+  return ''
+}
+
+/** 代码块 / Mermaid 渲染器 */
+const MarkdownPre = React.memo(function MarkdownPre({
+  children: preChildren,
+}: { children?: React.ReactNode }): React.ReactElement {
+  const codeChild = React.Children.toArray(preChildren).find(
+    (child): child is React.ReactElement =>
+      React.isValidElement(child) && (child as React.ReactElement).type === 'code'
+  ) as React.ReactElement | undefined
+
+  if (codeChild) {
+    const codeProps = codeChild.props as { className?: string; children?: React.ReactNode }
+    if (codeProps.className?.includes('language-mermaid')) {
+      const mermaidCode = extractText(codeProps.children).replace(/\n$/, '')
+      return <MermaidBlock code={mermaidCode} />
+    }
+  }
+
+  return <CodeBlock>{preChildren}</CodeBlock>
+})
+
+/** 行内代码 / 文件路径渲染器 */
+const MarkdownInlineCode = React.memo(function MarkdownInlineCode({
+  children: codeChildren,
+  className: codeClassName,
+  basePath,
+  ...codeProps
+}: React.HTMLAttributes<HTMLElement> & { basePath?: string }): React.ReactElement {
+  if (codeClassName) {
+    return <code className={codeClassName} {...codeProps}>{codeChildren}</code>
+  }
+
+  const text = typeof codeChildren === 'string' ? codeChildren : ''
+
+  if (text) {
+    if (isAbsoluteFilePath(text)) {
+      return <FilePathChip filePath={text.trim()} />
+    }
+    if (basePath && isRelativeFilePath(text)) {
+      return <FilePathChip filePath={text.trim()} basePath={basePath} />
+    }
+  }
+
+  return <code {...codeProps}>{codeChildren}</code>
+})
+
+/** Markdown 图片渲染缓存（key: basePath + src） */
+const MARKDOWN_IMAGE_CACHE = new Map<string, string | null>()
+const IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp|svg|bmp|ico)(?:[?#][^\s]*)?$/i
+
+function isDirectImageSrc(src: string): boolean {
+  return /^(data:|blob:|https?:)/i.test(src)
+}
+
+function decodeFileUrlPath(src: string): string | null {
+  try {
+    const url = new URL(src)
+    if (url.protocol !== 'file:') return null
+    let pathname = decodeURIComponent(url.pathname)
+    // Windows file URL: /C:/path/to/file.png
+    if (/^\/[A-Za-z]:\//.test(pathname)) {
+      pathname = pathname.slice(1)
+    }
+    return pathname
+  } catch {
+    return null
+  }
+}
+
+function getImageLookupPath(src: string): string | null {
+  if (isDirectImageSrc(src)) return null
+  if (src.startsWith('file://')) return decodeFileUrlPath(src)
+  return src
+}
+
+function normalizeImagePathCandidate(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^["'`<]+/, '')
+    .replace(/[>"'`]+$/, '')
+    .replace(/[),.;:!?]+$/, '')
+}
+
+function isLikelyImagePath(raw: string): boolean {
+  const candidate = normalizeImagePathCandidate(raw)
+  if (!candidate) return false
+  if (!IMAGE_PATH_RE.test(candidate)) return false
+  if (candidate.includes(' ')) return false
+  return true
+}
+
+function extractPathFromMarkdownImage(markdownImage: string): string {
+  const match = markdownImage.match(/!\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/)
+  return match?.[1] ? normalizeImagePathCandidate(match[1]) : ''
+}
+
+function getImageAltFromPath(path: string): string {
+  const normalized = path.split(/[?#]/)[0] ?? path
+  const filename = normalized.split(/[\\/]/).pop() ?? 'image'
+  return filename.replace(/\.[^.]+$/, '') || 'image'
+}
+
+function appendAutoImageMarkdown(content: string): string {
+  const existingImages = new Set<string>()
+  const markdownImagePattern = /!\[[^\]]*]\(([^)\n]+)\)/g
+  let existingMatch: RegExpExecArray | null
+  while ((existingMatch = markdownImagePattern.exec(content)) !== null) {
+    const extracted = extractPathFromMarkdownImage(existingMatch[0])
+    if (extracted) existingImages.add(extracted)
+  }
+
+  const autoImages = new Set<string>()
+
+  // 1) fenced code block: ```\npath/to/image.png\n```
+  const fencePattern = /```[^\n]*\n([\s\S]*?)\n```/g
+  let fenceMatch: RegExpExecArray | null
+  while ((fenceMatch = fencePattern.exec(content)) !== null) {
+    const blockText = fenceMatch[1]?.trim()
+    if (!blockText) continue
+    if (blockText.includes('\n')) continue
+    const candidate = normalizeImagePathCandidate(blockText)
+    if (isLikelyImagePath(candidate) && !existingImages.has(candidate)) {
+      autoImages.add(candidate)
+    }
+  }
+
+  // 2) standalone line: path/to/image.png
+  const linePattern = /^\s*(?:[-*]\s+)?([^\s]+(?:\/|\\)?[^\s]*\.(?:png|jpe?g|gif|webp|svg|bmp|ico)(?:[?#][^\s]*)?)\s*$/gim
+  let lineMatch: RegExpExecArray | null
+  while ((lineMatch = linePattern.exec(content)) !== null) {
+    const candidate = normalizeImagePathCandidate(lineMatch[1] ?? '')
+    if (isLikelyImagePath(candidate) && !existingImages.has(candidate)) {
+      autoImages.add(candidate)
+    }
+  }
+
+  if (autoImages.size === 0) return content
+
+  const injected = Array.from(autoImages).map((path) => `![${getImageAltFromPath(path)}](${path})`).join('\n\n')
+  return `${content}\n\n${injected}`
+}
+
+const MarkdownImage = React.memo(function MarkdownImage({
+  src,
+  alt,
+  title,
+  className: imageClassName,
+  basePath,
+  ...imgProps
+}: React.ImgHTMLAttributes<HTMLImageElement> & { basePath?: string }): React.ReactElement {
+  const srcText = typeof src === 'string' ? src.trim() : ''
+  const lookupPath = React.useMemo(() => getImageLookupPath(srcText), [srcText])
+  const cacheKey = React.useMemo(
+    () => (lookupPath ? `${basePath ?? ''}::${lookupPath}` : ''),
+    [basePath, lookupPath]
+  )
+
+  const [resolvedSrc, setResolvedSrc] = React.useState<string | null>(() => {
+    if (!srcText) return null
+    if (isDirectImageSrc(srcText)) return srcText
+    if (cacheKey && MARKDOWN_IMAGE_CACHE.has(cacheKey)) {
+      return MARKDOWN_IMAGE_CACHE.get(cacheKey) ?? null
+    }
+    return null
+  })
+  const [loading, setLoading] = React.useState<boolean>(() => {
+    if (!srcText || isDirectImageSrc(srcText)) return false
+    return !(cacheKey && MARKDOWN_IMAGE_CACHE.has(cacheKey))
+  })
+
+  React.useEffect(() => {
+    let cancelled = false
+
+    if (!srcText) {
+      setResolvedSrc(null)
+      setLoading(false)
+      return
+    }
+
+    if (isDirectImageSrc(srcText)) {
+      setResolvedSrc(srcText)
+      setLoading(false)
+      return
+    }
+
+    if (!lookupPath) {
+      setResolvedSrc(null)
+      setLoading(false)
+      return
+    }
+
+    if (cacheKey && MARKDOWN_IMAGE_CACHE.has(cacheKey)) {
+      setResolvedSrc(MARKDOWN_IMAGE_CACHE.get(cacheKey) ?? null)
+      setLoading(false)
+      return
+    }
+
+    setLoading(true)
+    window.electronAPI
+      .readLocalImage(lookupPath, basePath)
+      .then((dataUrl) => {
+        if (cancelled) return
+        if (cacheKey) MARKDOWN_IMAGE_CACHE.set(cacheKey, dataUrl)
+        setResolvedSrc(dataUrl)
+        setLoading(false)
+      })
+      .catch((error) => {
+        if (cancelled) return
+        console.warn('[MarkdownImage] 读取本地图片失败:', error)
+        if (cacheKey) MARKDOWN_IMAGE_CACHE.set(cacheKey, null)
+        setResolvedSrc(null)
+        setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [basePath, cacheKey, lookupPath, srcText])
+
+  if (!srcText) {
+    return <span className="text-xs text-muted-foreground/70">[图片链接为空]</span>
+  }
+
+  if (resolvedSrc) {
+    return (
+      <img
+        {...imgProps}
+        src={resolvedSrc}
+        alt={alt ?? ''}
+        title={title ?? srcText}
+        loading="lazy"
+        decoding="async"
+        className={cn('max-w-full rounded-lg border border-border/40', imageClassName)}
+      />
+    )
+  }
+
+  if (loading) {
+    return (
+      <span
+        className="inline-block h-28 w-40 rounded-lg bg-muted/40 animate-pulse align-middle"
+        aria-label="图片加载中"
+      />
+    )
+  }
+
+  return (
+    <span className="text-xs text-muted-foreground/70">
+      [图片未找到: {alt || srcText}]
+    </span>
+  )
+})
+
+/** 使用 react-markdown 渲染 assistant 消息内容，代码块使用 Shiki 语法高亮 */
+export const MessageResponse = React.memo(
+  function MessageResponse({ children, className, basePath }: MessageResponseProps): React.ReactElement {
+    const markdownContent = React.useMemo(() => appendAutoImageMarkdown(children), [children])
+
+    // 稳定引用的 components 对象，避免 react-markdown 每帧重建组件映射
+    const components = React.useMemo(() => ({
+      a: MarkdownLink,
+      pre: MarkdownPre,
+      code: (props: React.HTMLAttributes<HTMLElement>) => (
+        <MarkdownInlineCode {...props} basePath={basePath} />
+      ),
+      img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => (
+        <MarkdownImage {...props} basePath={basePath} />
+      ),
+    }), [basePath])
+
+    return (
+      <div
+        className={cn(
+          'prose dark:prose-invert max-w-none text-[15px]',
+          'prose-p:my-1.5 prose-p:leading-[1.6] prose-li:leading-[1.6] prose-pre:my-0 prose-headings:my-2',
+          'prose-table:my-2 prose-table:w-full prose-table:border-collapse prose-table:border prose-table:border-border/60',
+          'prose-thead:bg-muted/30 prose-tr:border-0',
+          'prose-th:border prose-th:border-border/60 prose-th:px-3 prose-th:py-2 prose-th:text-left prose-th:font-semibold',
+          'prose-td:border prose-td:border-border/60 prose-td:px-3 prose-td:py-2 prose-td:align-top',
+          '[&_.code-block-wrapper+.code-block-wrapper]:mt-4',
+          '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
+          className
+        )}
+      >
+        <Markdown
+          remarkPlugins={REMARK_PLUGINS}
+          rehypePlugins={REHYPE_PLUGINS}
+          components={components}
+        >
+          {markdownContent}
+        </Markdown>
+      </div>
+    )
+  },
+  (prevProps, nextProps) => prevProps.children === nextProps.children && prevProps.basePath === nextProps.basePath
+)
+
+// ===== UserMessageContent 可折叠用户消息 =====
+
+/** 折叠行数阈值 */
+const COLLAPSE_LINE_THRESHOLD = 4
+/** UserMessageContent 默认行高（text-[15px] + leading-[1.6]） */
+const DEFAULT_MESSAGE_LINE_HEIGHT = 24
+
+/** 将文本中的 @file:路径、/skill:名称、#mcp:名称 替换为样式化 chip */
+const MENTION_RE = /@file:(\S+)|\/skill:(\S+)|#mcp:(\S+)/g
+
+function renderTextWithMentions(text: string): React.ReactNode {
+  const parts: React.ReactNode[] = []
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  // 重置 lastIndex（全局正则复用时需要）
+  MENTION_RE.lastIndex = 0
+
+  while ((match = MENTION_RE.exec(text)) !== null) {
+    // 添加 match 前的纯文本
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index))
+    }
+
+    const key = `mention-${match.index}`
+
+    if (match[1]) {
+      // @file: 文件引用 — 蓝色 chip
+      const filePath = match[1]
+      const fileName = filePath.split('/').pop() || filePath
+      parts.push(
+        <span key={key} className="inline-flex items-center gap-0.5 bg-primary/10 text-primary rounded px-1 py-[1px] text-[13px] font-medium whitespace-nowrap align-baseline" title={filePath}>
+          <FileText className="size-3 inline shrink-0" />
+          {fileName}
+        </span>
+      )
+    } else if (match[2]) {
+      // /skill: Skill 引用 — 紫色 chip
+      const skillName = match[2]
+      parts.push(
+        <span key={key} className="inline-flex items-center gap-0.5 rounded px-1 py-[1px] text-[13px] font-medium whitespace-nowrap align-baseline bg-[hsl(270_60%_60%/0.15)] text-[hsl(270_60%_50%)]">
+          <Sparkles className="size-3 inline shrink-0" />
+          {skillName}
+        </span>
+      )
+    } else if (match[3]) {
+      // #mcp: MCP 引用 — 绿色 chip
+      const mcpName = match[3]
+      parts.push(
+        <span key={key} className="inline-flex items-center gap-0.5 rounded px-1 py-[1px] text-[13px] font-medium whitespace-nowrap align-baseline bg-[hsl(160_60%_45%/0.15)] text-[hsl(160_60%_35%)]">
+          <Server className="size-3 inline shrink-0" />
+          {mcpName}
+        </span>
+      )
+    }
+
+    lastIndex = match.index + match[0].length
+  }
+
+  // 添加剩余文本
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex))
+  }
+
+  return parts.length > 0 ? parts : text
+}
+
+interface UserMessageContentProps extends HTMLAttributes<HTMLDivElement> {
+  children: string
+}
+
+/**
+ * 用户消息内容组件
+ * - 超过 4 行时默认折叠
+ * - 点击展开/收起，带渐变遮罩
+ */
+export const UserMessageContent = React.memo(
+  function UserMessageContent({ children, className, ...props }: UserMessageContentProps): React.ReactElement {
+    const [isExpanded, setIsExpanded] = React.useState(false)
+    const [shouldCollapse, setShouldCollapse] = React.useState(false)
+    const contentRef = React.useRef<HTMLDivElement>(null)
+    const [measureContext, setMeasureContext] = React.useState<{
+      width: number
+      font: string
+      lineHeight: number
+    } | null>(null)
+
+    // 监听内容容器尺寸与字体信息（避免基于 scrollHeight 的同步布局读取）
+    React.useEffect(() => {
+      const element = contentRef.current
+      if (!element) return
+
+      const updateMeasureContext = (): void => {
+        const computed = window.getComputedStyle(element)
+        const measuredLineHeight = Number.parseFloat(computed.lineHeight)
+        const nextContext = {
+          width: Math.max(0, Math.round(element.clientWidth * 100) / 100),
+          font: computed.font,
+          lineHeight: Number.isFinite(measuredLineHeight) && measuredLineHeight > 0
+            ? measuredLineHeight
+            : DEFAULT_MESSAGE_LINE_HEIGHT,
+        }
+
+        setMeasureContext((prev) => {
+          if (
+            prev
+            && prev.width === nextContext.width
+            && prev.font === nextContext.font
+            && prev.lineHeight === nextContext.lineHeight
+          ) {
+            return prev
+          }
+          return nextContext
+        })
+      }
+
+      updateMeasureContext()
+      const observer = new ResizeObserver(() => {
+        updateMeasureContext()
+      })
+      observer.observe(element)
+      return () => observer.disconnect()
+    }, [])
+
+    // 使用 pretext 预测行数，判断是否超过折叠阈值
+    React.useEffect(() => {
+      if (!measureContext) {
+        setShouldCollapse(false)
+        return
+      }
+
+      const result = estimateTextLayout({
+        text: children,
+        maxWidth: measureContext.width,
+        font: measureContext.font,
+        lineHeight: measureContext.lineHeight,
+        whiteSpace: 'pre-wrap',
+      })
+      setShouldCollapse(result.lineCount > COLLAPSE_LINE_THRESHOLD)
+    }, [children, measureContext])
+
+    const toggleExpand = React.useCallback(() => {
+      setIsExpanded((prev) => !prev)
+    }, [])
+
+    return (
+      <div className={cn('relative inline-block max-w-full rounded-[10px] bg-primary/10 px-3.5 py-2.5', shouldCollapse && !isExpanded && 'pb-6', className)} {...props}>
+        <div
+          ref={contentRef}
+          className={cn(
+            'whitespace-pre-wrap overflow-hidden transition-[max-height] duration-200 text-[15px] leading-[1.6]',
+            '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
+            shouldCollapse && !isExpanded && 'max-h-[6.5em]'
+          )}
+        >
+          {renderTextWithMentions(children)}
+        </div>
+        {shouldCollapse && (
+          <button
+            type="button"
+            onClick={toggleExpand}
+            className={cn(
+              'flex items-center gap-1 text-xs text-foreground/40 hover:text-foreground/70 transition-colors mt-1',
+              !isExpanded &&
+                'absolute bottom-0 left-0 right-0 px-3.5 pb-2.5 pt-4 rounded-b-[10px] bg-gradient-to-t from-primary/10 to-transparent'
+            )}
+          >
+            {isExpanded ? (
+              <>
+                <ChevronUp className="size-3" />
+                <span>收起</span>
+              </>
+            ) : (
+              <>
+                <ChevronDown className="size-3" />
+                <span>展开全部</span>
+              </>
+            )}
+          </button>
+        )}
+      </div>
+    )
+  },
+  (prevProps, nextProps) => prevProps.children === nextProps.children
+)
+
+// ===== MessageLoading 加载动画 =====
+
+type MessageLoadingProps = HTMLAttributes<HTMLDivElement> & { startedAt?: number }
+
+/** 等待首个 chunk 的加载动画 */
+export function MessageLoading({ className, startedAt, ...props }: MessageLoadingProps): React.ReactElement {
+  return (
+    <div className={cn('mt-0', className)} {...props}>
+      <LoadingIndicator
+        label="正在思考..."
+        size="sm"
+        showElapsed={startedAt || true}
+        className="text-muted-foreground/60"
+      />
+    </div>
+  )
+}
+
+// ===== MessageStopped 已停止生成 =====
+
+type MessageStoppedProps = HTMLAttributes<HTMLDivElement>
+
+/** "已停止生成" 状态标记 */
+export function MessageStopped({ className, ...props }: MessageStoppedProps): React.ReactElement {
+  return (
+    <div
+      className={cn('flex items-center gap-1.5 text-sm text-muted-foreground mt-2', className)}
+      {...props}
+    >
+      <span className="size-2 rounded-full bg-muted-foreground/40" />
+      <span>已停止生成</span>
+    </div>
+  )
+}
+
+// ===== MessageAttachments 消息附件展示 =====
+
+interface MessageAttachmentsProps extends HTMLAttributes<HTMLDivElement> {
+  /** 附件列表 */
+  attachments: FileAttachment[]
+}
+
+/** 消息附件容器 */
+export function MessageAttachments({
+  attachments,
+  className,
+  ...props
+}: MessageAttachmentsProps): React.ReactElement {
+  const imageAttachments = attachments.filter((att) => att.mediaType.startsWith('image/'))
+  const fileAttachments = attachments.filter((att) => !att.mediaType.startsWith('image/'))
+  const isSingleImage = imageAttachments.length === 1 && fileAttachments.length === 0
+
+  return (
+    <div className={cn('flex flex-col gap-2 mb-2', className)} {...props}>
+      {/* 图片附件 */}
+      {imageAttachments.length > 0 && (
+        <div className="flex flex-wrap gap-2.5">
+          {imageAttachments.map((att) => (
+            <MessageAttachmentImage key={att.id} attachment={att} isSingle={isSingleImage} />
+          ))}
+        </div>
+      )}
+      {/* 文件附件 */}
+      {fileAttachments.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {fileAttachments.map((att) => (
+            <MessageAttachmentFile key={att.id} attachment={att} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ===== MessageAttachmentImage 图片附件展示 =====
+
+interface MessageAttachmentImageProps {
+  attachment: FileAttachment
+  /** 是否为唯一附件（单图模式） */
+  isSingle?: boolean
+}
+
+/** 图片附件展示（单图: max 500px，多图: 280px 方块） */
+function MessageAttachmentImage({ attachment, isSingle = false }: MessageAttachmentImageProps): React.ReactElement {
+  const [imageSrc, setImageSrc] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    window.electronAPI
+      .readAttachment(attachment.localPath)
+      .then((base64) => {
+        setImageSrc(`data:${attachment.mediaType};base64,${base64}`)
+      })
+      .catch((error) => {
+        console.error('[MessageAttachmentImage] 读取附件失败:', error)
+      })
+  }, [attachment.localPath, attachment.mediaType])
+
+  /** 保存图片到本地 */
+  const handleSave = React.useCallback((): void => {
+    window.electronAPI.saveImageAs(attachment.localPath, attachment.filename)
+  }, [attachment.localPath, attachment.filename])
+
+  if (!imageSrc) {
+    return (
+      <div className={cn(
+        'rounded-lg bg-muted/30 animate-pulse shrink-0',
+        isSingle ? 'w-[280px] h-[200px]' : 'size-[280px]'
+      )} />
+    )
+  }
+
+  const imgElement = isSingle ? (
+    <img
+      src={imageSrc}
+      alt={attachment.filename}
+      className="max-w-[500px] max-h-[min(500px,50vh)] rounded-lg object-contain"
+    />
+  ) : (
+    <img
+      src={imageSrc}
+      alt={attachment.filename}
+      className="size-[280px] rounded-lg object-cover shrink-0"
+    />
+  )
+
+  return (
+    <div className="relative group inline-block">
+      {imgElement}
+      <button
+        type="button"
+        onClick={handleSave}
+        className="absolute bottom-2 right-2 p-1.5 rounded-md bg-black/50 text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/70"
+        title="保存图片"
+      >
+        <Download className="size-4" />
+      </button>
+    </div>
+  )
+}
+
+// ===== MessageAttachmentFile 文件附件展示 =====
+
+interface MessageAttachmentFileProps {
+  attachment: FileAttachment
+}
+
+/** 文件附件展示（标签样式，teal 色调） */
+function MessageAttachmentFile({ attachment }: MessageAttachmentFileProps): React.ReactElement {
+  /** 截断文件名 */
+  const displayName = attachment.filename.length > 20
+    ? attachment.filename.slice(0, 17) + '...'
+    : attachment.filename
+
+  return (
+    <div className="flex items-center gap-2 rounded-lg bg-[#37a5aa]/10 border border-[#37a5aa]/20 px-3 py-1.5 text-[13px] text-[#37a5aa] shrink-0">
+      <Paperclip className="size-4" />
+      <span>{displayName}</span>
+    </div>
+  )
+}
+
+// ===== StreamingIndicator 流式呼吸脉冲点 =====
+
+type StreamingIndicatorProps = HTMLAttributes<HTMLSpanElement>
+
+/** 流式生成中的呼吸脉冲点指示器 */
+export function StreamingIndicator({ className, ...props }: StreamingIndicatorProps): React.ReactElement {
+  return (
+    <span
+      className={cn(
+        'inline-block size-2 rounded-full bg-primary/60 animate-pulse ml-1 align-middle',
+        className
+      )}
+      {...props}
+    />
+  )
+}
