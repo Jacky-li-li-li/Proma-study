@@ -84,6 +84,8 @@ interface SystemPromptContext {
   permissionMode: PromaPermissionMode
   /** 记忆服务是否已启用且配置了 API Key */
   memoryEnabled: boolean
+  /** 用户在设置中填写的 Agent 自定义提示词（非空时替换内置提示词） */
+  customPromptAppend?: string
 }
 
 /**
@@ -94,6 +96,12 @@ interface SystemPromptContext {
  * 工具（Read/Write/Edit/Bash 等）由 SDK 独立注册，不受 systemPrompt 影响。
  */
 export function buildSystemPrompt(ctx: SystemPromptContext): string {
+  // 替换模式：用户填写了自定义提示词时，直接使用该提示词，不再拼接内置 Proma 提示词
+  const customPromptOverride = ctx.customPromptAppend?.trim()
+  if (customPromptOverride) {
+    return customPromptOverride
+  }
+
   const profile = getUserProfile()
   const userName = profile.userName || '用户'
 

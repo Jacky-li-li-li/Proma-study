@@ -176,11 +176,43 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'))
   }
 
+  // 窗口显示兜底：避免渲染进程加载异常时窗口一直不可见
+  let hasShownWindow = false
+  const showWindowSafely = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed() || hasShownWindow) return
+    hasShownWindow = true
+    ensureWindowOnScreen(mainWindow)
+    mainWindow.maximize()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+
   // 窗口就绪后最大化显示
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.maximize()
-    mainWindow?.show()
+    showWindowSafely()
   })
+
+  // 某些异常场景（如 dev server 未就绪）ready-to-show 不会触发，超时后兜底显示
+  const readyToShowTimeout = setTimeout(() => {
+    if (!hasShownWindow) {
+      console.warn('[窗口] ready-to-show 超时，执行兜底显示')
+      showWindowSafely()
+    }
+  }, 4000)
+
+  // 主页面加载失败时仍显示窗口，避免应用“无窗口假死”
+  mainWindow.webContents.on(
+    'did-fail-load',
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return
+      console.error('[窗口] 主页面加载失败:', {
+        errorCode,
+        errorDescription,
+        validatedURL,
+      })
+      showWindowSafely()
+    },
+  )
 
   // 拦截页面内导航，外部链接用系统浏览器打开，防止 Electron 窗口被覆盖
   mainWindow.webContents.on('will-navigate', (event, url) => {
@@ -213,6 +245,7 @@ function createWindow(): void {
   }
 
   mainWindow.on('closed', () => {
+    clearTimeout(readyToShowTimeout)
     mainWindow = null
   })
 }

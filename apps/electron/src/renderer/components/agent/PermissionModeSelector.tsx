@@ -56,19 +56,6 @@ export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProp
     return ws?.slug ?? null
   }, [currentWorkspaceId, workspaces])
 
-  // 初始化：如果当前 session 不在 Map 中，从默认值写入，确保隔离
-  React.useEffect(() => {
-    if (!modeMap.has(sessionId)) {
-      setModeMap((prev: Map<string, PromaPermissionMode>) => {
-        if (prev.has(sessionId)) return prev
-        const next = new Map(prev)
-        next.set(sessionId, defaultMode)
-        return next
-      })
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅 sessionId 变化时初始化
-  }, [sessionId])
-
   // 加载工作区权限模式（仅值变化时更新，避免切换会话时抖动）
   React.useEffect(() => {
     if (!workspaceSlug) return
@@ -82,6 +69,18 @@ export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProp
       })
   // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在 workspaceSlug 变化时重新加载
   }, [workspaceSlug])
+
+  // 初始化：如果当前 session 不在 Map 中，从默认值写入，确保隔离
+  React.useEffect(() => {
+    if (!modeMap.has(sessionId)) {
+      setModeMap((prev: Map<string, PromaPermissionMode>) => {
+        if (prev.has(sessionId)) return prev
+        const next = new Map(prev)
+        next.set(sessionId, defaultMode)
+        return next
+      })
+    }
+  }, [sessionId])
 
   /** 循环切换模式 */
   const cycleMode = React.useCallback(async () => {

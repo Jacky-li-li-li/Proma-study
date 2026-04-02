@@ -38,6 +38,7 @@ import { getWorkspaceAttachedDirectories } from './agent-workspace-manager'
 import { getRuntimeStatus } from './runtime-init'
 import { getSettings } from './settings-service'
 import { buildSystemPrompt, buildDynamicContext, buildBuiltinAgents } from './agent-prompt-builder'
+import { getAgentPromptAppend } from './system-prompt-manager'
 import { permissionService } from './agent-permission-service'
 import type { PermissionResult, CanUseToolOptions } from './agent-permission-service'
 import { askUserService } from './agent-ask-user-service'
@@ -1129,6 +1130,7 @@ export class AgentOrchestrator {
             sessionId,
             permissionMode: initialPermissionMode,
             memoryEnabled: (() => { const mc = getMemoryConfig(); return mc.enabled && !!mc.apiKey })(),
+            customPromptAppend: getAgentPromptAppend(),
           }),
         },
         resumeSessionId: existingSdkSessionId,
