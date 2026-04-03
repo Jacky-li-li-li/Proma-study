@@ -11,15 +11,18 @@
  */
 
 import { readFileSync, writeFileSync, unlinkSync, existsSync, rmSync, statSync } from 'node:fs'
-import { extname, basename, join, isAbsolute, normalize, resolve, sep } from 'node:path'
+import { extname, basename, isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dialog, BrowserWindow } from 'electron'
 import {
   getConfigDir,
+  getAttachmentsDir,
   getConversationAttachmentsDir,
   getAgentWorkspacesDir,
   resolveAttachmentPath,
+  isPathWithinRoot,
+  resolvePathWithinRoot,
 } from './config-paths'
 import type {
   FileAttachment,
@@ -67,12 +70,6 @@ const MIME_MAP: Record<string, string> = {
 
 /** 消息内联图片读取的最大文件大小（20MB） */
 const INLINE_IMAGE_MAX_SIZE = 20 * 1024 * 1024
-
-function isUnderRoot(targetPath: string, rootPath: string): boolean {
-  const normalizedTarget = normalize(targetPath)
-  const normalizedRoot = normalize(rootPath)
-  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(`${normalizedRoot}${sep}`)
-}
 
 function isImagePath(filePath: string): boolean {
   const ext = extname(filePath).toLowerCase()
@@ -165,12 +162,7 @@ export function readAttachmentAsBase64(localPath: string): string {
 
   if (isAbsolute(localPath)) {
     // 绝对路径：验证在 ~/.proma/ 目录下，防止路径穿越
-    const configDir = getConfigDir()
-    const normalized = normalize(localPath)
-    if (!normalized.startsWith(configDir)) {
-      throw new Error(`附件路径不在安全目录内: ${localPath}`)
-    }
-    fullPath = normalized
+    fullPath = resolvePathWithinRoot(getConfigDir(), localPath)
   } else {
     fullPath = resolveAttachmentPath(localPath)
   }
@@ -220,7 +212,7 @@ export function readLocalImageAsDataUrl(imagePath: string, basePath?: string): s
   }
 
   for (const candidate of candidates) {
-    if (!allowedRoots.some((root) => isUnderRoot(candidate, root))) continue
+    if (!allowedRoots.some((root) => isPathWithinRoot(candidate, root))) continue
     if (!existsSync(candidate)) continue
     if (!isImagePath(candidate)) continue
 
@@ -262,7 +254,7 @@ export function deleteAttachment(localPath: string): void {
  * @param conversationId 对话 ID
  */
 export function deleteConversationAttachments(conversationId: string): void {
-  const dir = join(resolveAttachmentPath(''), conversationId)
+  const dir = resolvePathWithinRoot(getAttachmentsDir(), conversationId)
 
   if (existsSync(dir)) {
     try {

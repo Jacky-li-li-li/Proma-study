@@ -5,7 +5,7 @@
  * 所有用户配置存储在 ~/.proma/ 目录下。
  */
 
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { mkdirSync, existsSync, cpSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 
@@ -101,7 +101,7 @@ export function getAttachmentsDir(): string {
  * @returns ~/.proma/attachments/{conversationId}/
  */
 export function getConversationAttachmentsDir(conversationId: string): string {
-  const dir = join(getAttachmentsDir(), conversationId)
+  const dir = resolvePathWithinRoot(getAttachmentsDir(), conversationId)
 
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
@@ -117,7 +117,38 @@ export function getConversationAttachmentsDir(conversationId: string): string {
  * @returns 完整路径 ~/.proma/attachments/{conversationId}/{uuid}.ext
  */
 export function resolveAttachmentPath(localPath: string): string {
-  return join(getAttachmentsDir(), localPath)
+  return resolvePathWithinRoot(getAttachmentsDir(), localPath)
+}
+
+/**
+ * 判断目标路径是否位于给定根目录内
+ *
+ * 使用 resolve + relative 做边界判断，避免 startsWith 造成的前缀误判。
+ */
+export function isPathWithinRoot(targetPath: string, rootPath: string): boolean {
+  const absoluteRoot = resolve(rootPath)
+  const absoluteTarget = resolve(targetPath)
+  const relativePath = relative(absoluteRoot, absoluteTarget)
+
+  if (relativePath === '') return true
+  if (isAbsolute(relativePath)) return false
+  return !relativePath.startsWith('..') && !relativePath.startsWith(`..${sep}`)
+}
+
+/**
+ * 解析根目录内的安全路径
+ *
+ * 传入的 segments 可以是相对路径或绝对路径；最终路径必须位于 rootPath 内。
+ */
+export function resolvePathWithinRoot(rootPath: string, ...segments: string[]): string {
+  const absoluteRoot = resolve(rootPath)
+  const targetPath = resolve(absoluteRoot, ...segments)
+
+  if (!isPathWithinRoot(targetPath, absoluteRoot)) {
+    throw new Error(`访问路径超出安全根目录范围: ${targetPath}`)
+  }
+
+  return targetPath
 }
 
 /**

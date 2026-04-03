@@ -24,5 +24,4 @@ interface UpdaterAPI {
 // 附件临时 base64 缓存（用于发送前暂存数据）
 interface Window {
   __pendingAttachmentData?: Map<string, string>
-  __pendingAgentFileData?: Map<string, string>
 }

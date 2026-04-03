@@ -10,7 +10,7 @@
  */
 
 import * as React from 'react'
-import { useAtom, useAtomValue } from 'jotai'
+import { useAtomValue, useSetAtom, useStore } from 'jotai'
 import { Loader2 } from 'lucide-react'
 import { appModeAtom } from '@/atoms/app-mode'
 import { conversationsAtom } from '@/atoms/chat-atoms'
@@ -19,15 +19,43 @@ import { tabsAtom, splitLayoutAtom, openTab } from '@/atoms/tab-atoms'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { useCreateSession } from '@/hooks/useCreateSession'
 
+type DraftChatCreator = (options?: { draft?: boolean }) => Promise<string | undefined>
+type DraftAgentCreator = (options?: { draft?: boolean }) => Promise<string | undefined>
+
+let chatDraftCreationInFlight: Promise<string | undefined> | null = null
+const agentDraftCreationInFlight = new Map<string, Promise<string | undefined>>()
+
+function createChatDraftOnce(createChat: DraftChatCreator): Promise<string | undefined> {
+  if (chatDraftCreationInFlight) return chatDraftCreationInFlight
+  chatDraftCreationInFlight = createChat({ draft: true }).finally(() => {
+    chatDraftCreationInFlight = null
+  })
+  return chatDraftCreationInFlight
+}
+
+function createAgentDraftOnce(
+  workspaceKey: string,
+  createAgent: DraftAgentCreator,
+): Promise<string | undefined> {
+  const inFlight = agentDraftCreationInFlight.get(workspaceKey)
+  if (inFlight) return inFlight
+  const promise = createAgent({ draft: true }).finally(() => {
+    agentDraftCreationInFlight.delete(workspaceKey)
+  })
+  agentDraftCreationInFlight.set(workspaceKey, promise)
+  return promise
+}
+
 export function WelcomeView(): React.ReactElement {
+  const store = useStore()
   const mode = useAtomValue(appModeAtom)
-  const conversations = useAtomValue(conversationsAtom)
-  const agentSessions = useAtomValue(agentSessionsAtom)
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const agentSettingsReady = useAtomValue(agentSettingsReadyAtom)
   const draftSessionIds = useAtomValue(draftSessionIdsAtom)
-  const [tabs, setTabs] = useAtom(tabsAtom)
-  const [layout, setLayout] = useAtom(splitLayoutAtom)
+  const setConversations = useSetAtom(conversationsAtom)
+  const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const setTabs = useSetAtom(tabsAtom)
+  const setLayout = useSetAtom(splitLayoutAtom)
   const { createChat, createAgent } = useCreateSession()
   const initRef = React.useRef(false)
 
@@ -36,39 +64,87 @@ export function WelcomeView(): React.ReactElement {
     // Agent 模式需等待 settings 就绪（workspaceId 等异步加载完成）
     if (mode === 'agent' && !agentSettingsReady) return
     initRef.current = true
+    let cancelled = false
 
-    if (mode === 'chat') {
-      // 优先复用现有非归档、非 draft 会话
-      const existing = conversations.find((c) => !c.archived && !draftSessionIds.has(c.id))
-      if (existing) {
-        const result = openTab(tabs, layout, {
-          type: 'chat',
-          sessionId: existing.id,
-          title: existing.title,
-        })
-        setTabs(result.tabs)
-        setLayout(result.layout)
-      } else {
-        createChat({ draft: true })
-      }
-    } else {
-      // Agent 模式：按当前工作区过滤
-      const existing = agentSessions.find(
-        (s) => !s.archived && s.workspaceId === currentWorkspaceId && !draftSessionIds.has(s.id),
-      )
-      if (existing) {
-        const result = openTab(tabs, layout, {
-          type: 'agent',
-          sessionId: existing.id,
-          title: existing.title,
-        })
-        setTabs(result.tabs)
-        setLayout(result.layout)
-      } else {
-        createAgent({ draft: true })
+    const bootstrap = async (): Promise<void> => {
+      try {
+        // 组件仅在没有标签页时显示，若期间已有标签则不再处理。
+        if (store.get(tabsAtom).length > 0) return
+
+        if (mode === 'chat') {
+          // 先实时拉取会话列表，避免初始化竞态把“尚未加载”误判为“没有会话”。
+          const latestConversations = await window.electronAPI.listConversations()
+          if (cancelled) return
+          setConversations(latestConversations)
+
+          const existing = latestConversations.find((c) => !c.archived && !draftSessionIds.has(c.id))
+          if (existing) {
+            if (store.get(tabsAtom).length > 0) return
+            const tabs = store.get(tabsAtom)
+            const layout = store.get(splitLayoutAtom)
+            const result = openTab(tabs, layout, {
+              type: 'chat',
+              sessionId: existing.id,
+              title: existing.title,
+            })
+            setTabs(result.tabs)
+            setLayout(result.layout)
+            return
+          }
+
+          if (store.get(tabsAtom).length > 0) return
+          await createChatDraftOnce(createChat)
+          return
+        }
+
+        // Agent 模式：先实时拉取会话列表，再按当前工作区判空。
+        const latestSessions = await window.electronAPI.listAgentSessions()
+        if (cancelled) return
+        setAgentSessions(latestSessions)
+
+        const existing = latestSessions.find(
+          (s) => !s.archived && s.workspaceId === currentWorkspaceId && !draftSessionIds.has(s.id),
+        )
+        if (existing) {
+          if (store.get(tabsAtom).length > 0) return
+          const tabs = store.get(tabsAtom)
+          const layout = store.get(splitLayoutAtom)
+          const result = openTab(tabs, layout, {
+            type: 'agent',
+            sessionId: existing.id,
+            title: existing.title,
+          })
+          setTabs(result.tabs)
+          setLayout(result.layout)
+          return
+        }
+
+        if (store.get(tabsAtom).length > 0) return
+        const workspaceKey = currentWorkspaceId ?? '__no_workspace__'
+        await createAgentDraftOnce(workspaceKey, createAgent)
+      } catch (error) {
+        console.error('[WelcomeView] 初始化会话失败:', error)
       }
     }
-  }, [agentSettingsReady]) // eslint-disable-line react-hooks/exhaustive-deps
+
+    void bootstrap()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    mode,
+    currentWorkspaceId,
+    agentSettingsReady,
+    createChat,
+    createAgent,
+    draftSessionIds,
+    setConversations,
+    setAgentSessions,
+    setTabs,
+    setLayout,
+    store,
+  ])
 
   // 短暂的过渡状态（通常几十毫秒内就会被 SplitContainer 替换）
   return (

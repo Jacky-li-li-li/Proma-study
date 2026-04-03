@@ -45,9 +45,15 @@ import type {
   AgentSavedFile,
   AgentAttachDirectoryInput,
   WorkspaceAttachDirectoryInput,
+  QueuedMessageStatusInput,
+  CancelQueuedMessageInput,
+  PromoteQueuedMessageInput,
+  QueuedMessageMutationResult,
+  QueuedMessageStatusResult,
   GetTaskOutputInput,
   GetTaskOutputResult,
   StopTaskInput,
+  StopTaskResult,
   WorkspaceMcpConfig,
   SkillMeta,
   WorkspaceCapabilities,
@@ -344,6 +350,18 @@ export interface ElectronAPI {
 
   /** 流式追加发送 Agent 消息（Agent 运行中） */
   queueAgentMessage: (input: AgentQueueMessageInput) => Promise<string>
+  /** 取消队列消息 */
+  cancelQueuedAgentMessage: (input: CancelQueuedMessageInput) => Promise<QueuedMessageMutationResult>
+  /** 提升队列消息优先级 */
+  promoteQueuedAgentMessage: (input: PromoteQueuedMessageInput) => Promise<QueuedMessageMutationResult>
+  /** 查询队列消息状态 */
+  getQueuedMessageStatus: (input: QueuedMessageStatusInput) => Promise<QueuedMessageStatusResult>
+  /** 订阅队列消息状态变化 */
+  onQueuedMessageStatus: (callback: (data: {
+    sessionId: string
+    action: 'queued' | 'cancel' | 'promote' | 'status'
+    result: QueuedMessageMutationResult | QueuedMessageStatusResult
+  }) => void) => () => void
 
   // ===== Agent 后台任务管理 =====
 
@@ -351,7 +369,7 @@ export interface ElectronAPI {
   getTaskOutput: (input: GetTaskOutputInput) => Promise<GetTaskOutputResult>
 
   /** 停止任务 */
-  stopTask: (input: StopTaskInput) => Promise<void>
+  stopTask: (input: StopTaskInput) => Promise<StopTaskResult>
 
   // ===== Agent 工作区管理相关 =====
 
@@ -1026,6 +1044,32 @@ const electronAPI: ElectronAPI = {
   // Agent 队列消息
   queueAgentMessage: (input: AgentQueueMessageInput) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.QUEUE_MESSAGE, input)
+  },
+
+  cancelQueuedAgentMessage: (input: CancelQueuedMessageInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.CANCEL_QUEUED_MESSAGE, input)
+  },
+
+  promoteQueuedAgentMessage: (input: PromoteQueuedMessageInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.PROMOTE_QUEUED_MESSAGE, input)
+  },
+
+  getQueuedMessageStatus: (input: QueuedMessageStatusInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.QUEUED_MESSAGE_STATUS, input)
+  },
+
+  onQueuedMessageStatus: (callback: (data: {
+    sessionId: string
+    action: 'queued' | 'cancel' | 'promote' | 'status'
+    result: QueuedMessageMutationResult | QueuedMessageStatusResult
+  }) => void) => {
+    const listener = (_: unknown, data: {
+      sessionId: string
+      action: 'queued' | 'cancel' | 'promote' | 'status'
+      result: QueuedMessageMutationResult | QueuedMessageStatusResult
+    }): void => callback(data)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.QUEUED_MESSAGE_STATUS, listener)
+    return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.QUEUED_MESSAGE_STATUS, listener) }
   },
 
   // Agent 后台任务管理

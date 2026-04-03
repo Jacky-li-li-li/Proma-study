@@ -24,6 +24,15 @@ import type {
   AgentStreamEvent,
   AgentStreamPayload,
   AgentQueueMessageInput,
+  QueuedMessageStatusInput,
+  CancelQueuedMessageInput,
+  PromoteQueuedMessageInput,
+  QueuedMessageStatusResult,
+  QueuedMessageMutationResult,
+  GetTaskOutputInput,
+  GetTaskOutputResult,
+  StopTaskInput,
+  StopTaskResult,
   PromaPermissionMode,
 } from '@proma/shared'
 import { ClaudeAgentAdapter } from './adapters/claude-agent-adapter'
@@ -218,9 +227,29 @@ export async function queueAgentMessage(
   return orchestrator.queueMessage(
     input.sessionId,
     input.userMessage,
-    undefined,
+    input.priority,
     input.uuid,
   )
+}
+
+export function getQueuedMessageStatus(input: QueuedMessageStatusInput): QueuedMessageStatusResult {
+  return orchestrator.getQueuedMessageStatus(input)
+}
+
+export function cancelQueuedMessage(input: CancelQueuedMessageInput): QueuedMessageMutationResult {
+  return orchestrator.cancelQueuedMessage(input)
+}
+
+export function promoteQueuedMessage(input: PromoteQueuedMessageInput): QueuedMessageMutationResult {
+  return orchestrator.promoteQueuedMessage(input)
+}
+
+export async function getTaskOutput(input: GetTaskOutputInput): Promise<GetTaskOutputResult> {
+  return orchestrator.getTaskOutput(input)
+}
+
+export async function stopTask(input: StopTaskInput): Promise<StopTaskResult> {
+  return orchestrator.stopTask(input)
 }
 
 // ===== 文件操作 =====

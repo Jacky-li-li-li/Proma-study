@@ -32,7 +32,20 @@ import {
 } from '@/atoms/notifications'
 import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
 import type { AgentStreamState } from '@/atoms/agent-atoms'
-import type { AgentStreamEvent, AgentStreamCompletePayload, AgentEvent, AgentStreamPayload, SDKAssistantMessage, SDKUserMessage, SDKSystemMessage, SDKContentBlock, SDKUserContentBlock } from '@proma/shared'
+import type {
+  AgentStreamEvent,
+  AgentStreamCompletePayload,
+  AgentEvent,
+  AgentStreamPayload,
+  SDKAssistantMessage,
+  SDKUserMessage,
+  SDKSystemMessage,
+  SDKContentBlock,
+  SDKUserContentBlock,
+  PermissionRequest,
+  AskUserRequest,
+  ExitPlanModeRequest,
+} from '@proma/shared'
 
 // ============================================================================
 // Phase 1 临时兼容层：将 AgentStreamPayload 转换为旧 AgentEvent
@@ -242,8 +255,11 @@ export function useGlobalAgentListeners(): void {
   const store = useStore()
 
   useEffect(() => {
+    let cancelled = false
+
     // ===== 0. 初始化：从持久化 meta 恢复 stoppedByUser 状态 =====
     window.electronAPI.listAgentSessions().then((sessions) => {
+      if (cancelled) return
       const stoppedIds = new Set<string>(
         sessions.filter((s) => s.stoppedByUser).map((s) => s.id)
       )
@@ -251,6 +267,37 @@ export function useGlobalAgentListeners(): void {
         store.set(stoppedByUserSessionsAtom, stoppedIds)
       }
     }).catch(console.error)
+
+    // ===== 0.1 初始化：恢复 pending requests =====
+    window.electronAPI.getPendingRequests()
+      .then((snapshot) => {
+        if (cancelled) return
+
+        const permissionRequests = new Map<string, readonly PermissionRequest[]>()
+        for (const request of snapshot.permissions) {
+          const current = permissionRequests.get(request.sessionId) ?? []
+          permissionRequests.set(request.sessionId, [...current, request])
+        }
+
+        const askUserRequests = new Map<string, readonly AskUserRequest[]>()
+        for (const request of snapshot.askUsers) {
+          const current = askUserRequests.get(request.sessionId) ?? []
+          askUserRequests.set(request.sessionId, [...current, request])
+        }
+
+        const exitPlanRequests = new Map<string, readonly ExitPlanModeRequest[]>()
+        for (const request of snapshot.exitPlans) {
+          const current = exitPlanRequests.get(request.sessionId) ?? []
+          exitPlanRequests.set(request.sessionId, [...current, request])
+        }
+
+        store.set(allPendingPermissionRequestsAtom, permissionRequests)
+        store.set(allPendingAskUserRequestsAtom, askUserRequests)
+        store.set(allPendingExitPlanRequestsAtom, exitPlanRequests)
+      })
+      .catch((error) => {
+        console.error('[GlobalAgentListeners] 恢复 pending requests 失败:', error)
+      })
 
     // ===== 1. 流式事件 =====
     const cleanupEvent = window.electronAPI.onAgentStreamEvent(
@@ -580,6 +627,7 @@ export function useGlobalAgentListeners(): void {
     })
 
     return () => {
+      cancelled = true
       cleanupEvent()
       cleanupComplete()
       cleanupError()

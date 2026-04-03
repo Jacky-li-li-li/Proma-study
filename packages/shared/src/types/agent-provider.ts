@@ -6,14 +6,14 @@
  * 未来可扩展：PiAgentAdapter 等。
  */
 
-import type { SDKMessage } from './agent'
+import type { AgentQueueMessagePriority, SDKMessage } from './agent'
 
 /** SDK 用户消息（队列消息注入用，匹配 SDK SDKUserMessage 结构） */
 export interface SDKUserMessageInput {
   type: 'user'
   message: { role: 'user'; content: string }
   parent_tool_use_id: null
-  priority?: 'now' | 'next' | 'later'
+  priority?: AgentQueueMessagePriority
   uuid?: string
   session_id: string
 }

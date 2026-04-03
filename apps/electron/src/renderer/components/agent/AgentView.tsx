@@ -43,7 +43,6 @@ import {
   agentSessionModelMapAtom,
   currentAgentWorkspaceIdAtom,
   agentPendingPromptAtom,
-  agentPendingFilesAtom,
   agentWorkspacesAtom,
   agentStreamErrorsAtom,
   agentSessionDraftsAtom,
@@ -72,6 +71,54 @@ import { AgentSessionProvider } from '@/contexts/session-context'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import type { AgentSendInput, AgentMessage, AgentPendingFile, ModelOption, SDKMessage } from '@proma/shared'
 import { fileToBase64 } from '@/lib/file-utils'
+
+type PendingAgentSessionState = {
+  files: AgentPendingFile[]
+  fileData: Map<string, string>
+}
+
+const pendingAgentSessionStateById = new Map<string, PendingAgentSessionState>()
+
+function clonePendingFiles(files: AgentPendingFile[]): AgentPendingFile[] {
+  return files.map((file) => ({ ...file }))
+}
+
+function clonePendingFileData(fileData: Map<string, string>): Map<string, string> {
+  return new Map(fileData)
+}
+
+function getPendingAgentSessionState(sessionId: string): PendingAgentSessionState {
+  const state = pendingAgentSessionStateById.get(sessionId)
+  if (state) {
+    return {
+      files: clonePendingFiles(state.files),
+      fileData: clonePendingFileData(state.fileData),
+    }
+  }
+
+  return {
+    files: [],
+    fileData: new Map<string, string>(),
+  }
+}
+
+function setPendingAgentSessionFiles(sessionId: string, files: AgentPendingFile[]): void {
+  const state = pendingAgentSessionStateById.get(sessionId) ?? {
+    files: [],
+    fileData: new Map<string, string>(),
+  }
+  state.files = clonePendingFiles(files)
+  pendingAgentSessionStateById.set(sessionId, state)
+}
+
+function setPendingAgentSessionFileData(sessionId: string, fileData: Map<string, string>): void {
+  const state = pendingAgentSessionStateById.get(sessionId) ?? {
+    files: [],
+    fileData: new Map<string, string>(),
+  }
+  state.fileData = clonePendingFileData(fileData)
+  pendingAgentSessionStateById.set(sessionId, state)
+}
 
 // ===== 思考模式 Hover Popover =====
 
@@ -178,7 +225,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const [pendingPrompt, setPendingPrompt] = useAtom(agentPendingPromptAtom)
-  const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtom)
+  const [pendingFiles, setPendingFiles] = React.useState<AgentPendingFile[]>(() => getPendingAgentSessionState(sessionId).files)
   const workspaces = useAtomValue(agentWorkspacesAtom)
   // 保持 channelId 稳定：初始化前使用上次有效值，避免工具栏抖动
   const stableChannelIdRef = React.useRef(agentChannelId)
@@ -260,9 +307,18 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
   // pendingFiles ref（供 addFilesAsAttachments 读取最新列表，避免闭包旧值）
   const pendingFilesRef = React.useRef(pendingFiles)
+  const pendingFileDataRef = React.useRef<Map<string, string>>(getPendingAgentSessionState(sessionId).fileData)
   React.useEffect(() => {
     pendingFilesRef.current = pendingFiles
-  }, [pendingFiles])
+    setPendingAgentSessionFiles(sessionId, pendingFiles)
+  }, [sessionId, pendingFiles])
+
+  React.useEffect(() => {
+    const snapshot = getPendingAgentSessionState(sessionId)
+    pendingFilesRef.current = snapshot.files
+    pendingFileDataRef.current = snapshot.fileData
+    setPendingFiles(snapshot.files)
+  }, [sessionId])
 
   // 渠道已选但模型未选时，自动选择第一个可用模型
   const globalChannels = useAtomValue(channelsAtom)
@@ -525,17 +581,17 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           previewUrl,
         }
 
-        if (!window.__pendingAgentFileData) {
-          window.__pendingAgentFileData = new Map<string, string>()
-        }
-        window.__pendingAgentFileData.set(pending.id, base64)
+        const nextFileData = new Map(pendingFileDataRef.current)
+        nextFileData.set(pending.id, base64)
+        pendingFileDataRef.current = nextFileData
+        setPendingAgentSessionFileData(sessionId, nextFileData)
 
         setPendingFiles((prev) => [...prev, pending])
       } catch (error) {
         console.error('[AgentView] 添加附件失败:', error)
       }
     }
-  }, [makeUniqueFilename, setPendingFiles])
+  }, [makeUniqueFilename, sessionId])
 
   /** 打开文件选择对话框 */
   const handleOpenFileDialog = React.useCallback(async (): Promise<void> => {
@@ -556,17 +612,17 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           previewUrl,
         }
 
-        if (!window.__pendingAgentFileData) {
-          window.__pendingAgentFileData = new Map<string, string>()
-        }
-        window.__pendingAgentFileData.set(pending.id, fileInfo.data)
+        const nextFileData = new Map(pendingFileDataRef.current)
+        nextFileData.set(pending.id, fileInfo.data)
+        pendingFileDataRef.current = nextFileData
+        setPendingAgentSessionFileData(sessionId, nextFileData)
 
         setPendingFiles((prev) => [...prev, pending])
       }
     } catch (error) {
       console.error('[AgentView] 文件选择对话框失败:', error)
     }
-  }, [setPendingFiles])
+  }, [sessionId])
 
   /** 附加文件夹（不复制，仅记录路径） */
   const handleAttachFolder = React.useCallback(async (): Promise<void> => {
@@ -599,10 +655,15 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       if (file?.previewUrl?.startsWith('blob:')) {
         URL.revokeObjectURL(file.previewUrl)
       }
-      window.__pendingAgentFileData?.delete(id)
-      return prev.filter((f) => f.id !== id)
+      const nextFileData = new Map(pendingFileDataRef.current)
+      nextFileData.delete(id)
+      pendingFileDataRef.current = nextFileData
+      setPendingAgentSessionFileData(sessionId, nextFileData)
+      const nextFiles = prev.filter((f) => f.id !== id)
+      pendingFilesRef.current = nextFiles
+      return nextFiles
     })
-  }, [setPendingFiles])
+  }, [sessionId])
 
   /** 粘贴文件处理 */
   const handlePasteFiles = React.useCallback((files: File[]): void => {
@@ -778,7 +839,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       if (workspace) {
         const filesToSave = pendingFiles.map((f) => ({
           filename: f.filename,
-          data: window.__pendingAgentFileData?.get(f.id) || '',
+          data: pendingFileDataRef.current.get(f.id) || '',
         }))
         try {
           const saved = await window.electronAPI.saveFilesToAgentSession({
@@ -796,8 +857,11 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       // 清理
       for (const f of pendingFiles) {
         if (f.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(f.previewUrl)
-        window.__pendingAgentFileData?.delete(f.id)
       }
+      pendingFileDataRef.current = new Map<string, string>()
+      pendingFilesRef.current = []
+      setPendingAgentSessionFiles(sessionId, [])
+      setPendingAgentSessionFileData(sessionId, pendingFileDataRef.current)
       setPendingFiles([])
     }
 

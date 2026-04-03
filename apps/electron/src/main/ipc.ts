@@ -5,6 +5,8 @@
  */
 
 import { ipcMain, nativeTheme, shell, dialog, BrowserWindow } from 'electron'
+import { existsSync, statSync } from 'node:fs'
+import { isAbsolute, relative, resolve } from 'node:path'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, MEMORY_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS } from '../types'
 import type { QuickTaskSubmitInput } from '../types'
@@ -28,6 +30,7 @@ import type {
   AgentSessionMeta,
   AgentMessage,
   AgentSendInput,
+  AgentQueueMessageInput,
   AgentWorkspace,
   AgentGenerateTitleInput,
   AgentSaveFilesInput,
@@ -35,9 +38,15 @@ import type {
   AgentSavedFile,
   AgentAttachDirectoryInput,
   WorkspaceAttachDirectoryInput,
+  QueuedMessageStatusInput,
+  CancelQueuedMessageInput,
+  PromoteQueuedMessageInput,
+  QueuedMessageMutationResult,
+  QueuedMessageStatusResult,
   GetTaskOutputInput,
   GetTaskOutputResult,
   StopTaskInput,
+  StopTaskResult,
   WorkspaceMcpConfig,
   SkillMeta,
   WorkspaceCapabilities,
@@ -136,7 +145,21 @@ import {
   autoArchiveAgentSessions,
   searchAgentSessionMessages,
 } from './lib/agent-session-manager'
-import { runAgent, stopAgent, generateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode } from './lib/agent-service'
+import {
+  runAgent,
+  stopAgent,
+  generateAgentTitle,
+  saveFilesToAgentSession,
+  saveFilesToWorkspaceFiles,
+  isAgentSessionActive,
+  queueAgentMessage,
+  getQueuedMessageStatus,
+  cancelQueuedMessage,
+  promoteQueuedMessage,
+  getTaskOutput,
+  stopTask,
+  updateAgentPermissionMode,
+} from './lib/agent-service'
 import { permissionService } from './lib/agent-permission-service'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
@@ -194,6 +217,59 @@ import { getDingTalkConfig, saveDingTalkConfig, getDecryptedClientSecret, getDin
 import { dingtalkBridgeManager } from './lib/dingtalk-bridge-manager'
 import { getWeChatConfig } from './lib/wechat-config'
 import { wechatBridge } from './lib/wechat-bridge'
+
+function isPathInsideRoot(targetPath: string, rootPath: string): boolean {
+  const safeTarget = resolve(targetPath)
+  const safeRoot = resolve(rootPath)
+  const rel = relative(safeRoot, safeTarget)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+function assertPathInsideRoot(targetPath: string, rootPath: string, errorMessage: string): string {
+  const safeTarget = resolve(targetPath)
+  if (!isPathInsideRoot(safeTarget, rootPath)) {
+    throw new Error(errorMessage)
+  }
+  return safeTarget
+}
+
+function normalizeExistingDirectoryPath(directoryPath: string): string {
+  const safePath = resolve(directoryPath)
+  if (!existsSync(safePath)) {
+    throw new Error(`目录不存在: ${directoryPath}`)
+  }
+  if (!statSync(safePath).isDirectory()) {
+    throw new Error(`不是目录: ${directoryPath}`)
+  }
+  return safePath
+}
+
+function collectAttachedDirectoryRoots(): string[] {
+  const roots = new Set<string>()
+
+  for (const session of listAgentSessions()) {
+    for (const dir of session.attachedDirectories ?? []) {
+      roots.add(resolve(dir))
+    }
+  }
+
+  for (const workspace of listAgentWorkspaces()) {
+    for (const dir of getWorkspaceAttachedDirectories(workspace.slug)) {
+      roots.add(resolve(dir))
+    }
+  }
+
+  return [...roots]
+}
+
+function assertPathInsideAttachedDirectories(targetPath: string, errorMessage: string): string {
+  const safeTarget = resolve(targetPath)
+  const roots = collectAttachedDirectoryRoots()
+  if (!roots.some((root) => isPathInsideRoot(safeTarget, root))) {
+    throw new Error(errorMessage)
+  }
+  return safeTarget
+}
 
 /**
  * 注册 IPC 处理器
@@ -944,7 +1020,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SEND_MESSAGE,
     async (event, input: AgentSendInput): Promise<void> => {
-      await runAgent(input, event.sender)
+      const { permissionModeOverride: _ignored, ...safeInput } = input
+      await runAgent(safeInput, event.sender)
     }
   )
 
@@ -961,27 +1038,75 @@ export function registerIpcHandlers(): void {
   // 排队发送消息
   ipcMain.handle(
     AGENT_IPC_CHANNELS.QUEUE_MESSAGE,
-    async (event, input: import('@proma/shared').AgentQueueMessageInput): Promise<string> => {
-      return queueAgentMessage(input, event.sender)
+    async (event, input: AgentQueueMessageInput): Promise<string> => {
+      const uuid = await queueAgentMessage(input, event.sender)
+      const statusSnapshot = getQueuedMessageStatus({
+        sessionId: input.sessionId,
+        messageUuid: uuid,
+      })
+      event.sender.send(AGENT_IPC_CHANNELS.QUEUED_MESSAGE_STATUS, {
+        sessionId: input.sessionId,
+        action: 'queued',
+        result: statusSnapshot,
+      })
+      return uuid
+    }
+  )
+
+  // 取消队列消息
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.CANCEL_QUEUED_MESSAGE,
+    async (event, input: CancelQueuedMessageInput): Promise<QueuedMessageMutationResult> => {
+      const result = cancelQueuedMessage(input)
+      event.sender.send(AGENT_IPC_CHANNELS.QUEUED_MESSAGE_STATUS, {
+        sessionId: input.sessionId,
+        action: 'cancel',
+        result,
+      })
+      return result
+    }
+  )
+
+  // 提升队列消息
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.PROMOTE_QUEUED_MESSAGE,
+    async (event, input: PromoteQueuedMessageInput): Promise<QueuedMessageMutationResult> => {
+      const result = promoteQueuedMessage(input)
+      event.sender.send(AGENT_IPC_CHANNELS.QUEUED_MESSAGE_STATUS, {
+        sessionId: input.sessionId,
+        action: 'promote',
+        result,
+      })
+      return result
+    }
+  )
+
+  // 查询队列消息状态
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.QUEUED_MESSAGE_STATUS,
+    async (_, input: QueuedMessageStatusInput): Promise<QueuedMessageStatusResult> => {
+      return getQueuedMessageStatus(input)
     }
   )
 
   // ===== Agent 后台任务管理 =====
 
-  // 获取任务输出（保留接口，供未来扩展）
+  // 获取任务输出
   ipcMain.handle(
     AGENT_IPC_CHANNELS.GET_TASK_OUTPUT,
     async (_, input: GetTaskOutputInput): Promise<GetTaskOutputResult> => {
       try {
-        // TODO: 实现通过 SDK 的 TaskOutput 获取任务输出
-        console.warn('[IPC] GET_TASK_OUTPUT: 当前版本暂未实现，返回空输出')
+        return await getTaskOutput(input)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.error('[IPC] 获取任务输出失败:', message)
         return {
+          status: 'failed',
+          message,
           output: '',
           isComplete: false,
+          taskStatus: 'unknown',
         }
-      } catch (error) {
-        console.error('[IPC] 获取任务输出失败:', error)
-        throw error
       }
     }
   )
@@ -1008,16 +1133,18 @@ export function registerIpcHandlers(): void {
   // 停止任务
   ipcMain.handle(
     AGENT_IPC_CHANNELS.STOP_TASK,
-    async (_, input: StopTaskInput): Promise<void> => {
+    async (_, input: StopTaskInput): Promise<StopTaskResult> => {
       try {
-        if (input.type === 'shell') {
-          console.warn('[IPC] STOP_TASK: Shell 任务停止功能待实现')
-        } else {
-          console.warn('[IPC] STOP_TASK: Agent 任务暂不支持单独停止')
-        }
+        return await stopTask(input)
       } catch (error) {
-        console.error('[IPC] 停止任务失败:', error)
-        throw error
+        const message = error instanceof Error ? error.message : String(error)
+        console.error('[IPC] 停止任务失败:', message)
+        return {
+          status: 'failed',
+          message,
+          stopped: false,
+          taskStatus: 'unknown',
+        }
       }
     }
   )
@@ -1358,14 +1485,15 @@ export function registerIpcHandlers(): void {
     async (_, input: AgentAttachDirectoryInput): Promise<string[]> => {
       const meta = getAgentSessionMeta(input.sessionId)
       if (!meta) throw new Error(`会话不存在: ${input.sessionId}`)
+      const safeDirectoryPath = normalizeExistingDirectoryPath(input.directoryPath)
 
       const existing = meta.attachedDirectories ?? []
-      if (existing.includes(input.directoryPath)) return existing
+      if (existing.includes(safeDirectoryPath)) return existing
 
-      const updated = [...existing, input.directoryPath]
+      const updated = [...existing, safeDirectoryPath]
       updateAgentSessionMeta(input.sessionId, { attachedDirectories: updated })
       // 启动附加目录文件监听
-      watchAttachedDirectory(input.directoryPath)
+      watchAttachedDirectory(safeDirectoryPath)
       return updated
     }
   )
@@ -1376,12 +1504,13 @@ export function registerIpcHandlers(): void {
     async (_, input: AgentAttachDirectoryInput): Promise<string[]> => {
       const meta = getAgentSessionMeta(input.sessionId)
       if (!meta) throw new Error(`会话不存在: ${input.sessionId}`)
+      const safeDirectoryPath = resolve(input.directoryPath)
 
       const existing = meta.attachedDirectories ?? []
-      const updated = existing.filter((d) => d !== input.directoryPath)
+      const updated = existing.filter((d) => d !== safeDirectoryPath)
       updateAgentSessionMeta(input.sessionId, { attachedDirectories: updated })
       // 停止附加目录文件监听
-      unwatchAttachedDirectory(input.directoryPath)
+      unwatchAttachedDirectory(safeDirectoryPath)
       return updated
     }
   )
@@ -1390,8 +1519,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.ATTACH_WORKSPACE_DIRECTORY,
     async (_, input: WorkspaceAttachDirectoryInput): Promise<string[]> => {
-      const updated = attachWorkspaceDirectory(input.workspaceSlug, input.directoryPath)
-      watchAttachedDirectory(input.directoryPath)
+      const safeDirectoryPath = normalizeExistingDirectoryPath(input.directoryPath)
+      const updated = attachWorkspaceDirectory(input.workspaceSlug, safeDirectoryPath)
+      watchAttachedDirectory(safeDirectoryPath)
       return updated
     }
   )
@@ -1400,8 +1530,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.DETACH_WORKSPACE_DIRECTORY,
     async (_, input: WorkspaceAttachDirectoryInput): Promise<string[]> => {
-      const updated = detachWorkspaceDirectory(input.workspaceSlug, input.directoryPath)
-      unwatchAttachedDirectory(input.directoryPath)
+      const safeDirectoryPath = resolve(input.directoryPath)
+      const updated = detachWorkspaceDirectory(input.workspaceSlug, safeDirectoryPath)
+      unwatchAttachedDirectory(safeDirectoryPath)
       return updated
     }
   )
@@ -1430,15 +1561,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.LIST_DIRECTORY,
     async (_, dirPath: string): Promise<FileEntry[]> => {
-      const { readdirSync, statSync } = await import('node:fs')
-      const { resolve } = await import('node:path')
+      const { readdirSync } = await import('node:fs')
 
       // 安全校验：路径必须在 agent-workspaces 目录下
-      const safePath = resolve(dirPath)
-      const workspacesRoot = resolve(getAgentWorkspacesDir())
-      if (!safePath.startsWith(workspacesRoot)) {
-        throw new Error('访问路径超出 Agent 工作区范围')
-      }
+      const safePath = assertPathInsideRoot(dirPath, getAgentWorkspacesDir(), '访问路径超出 Agent 工作区范围')
 
       const entries: FileEntry[] = []
       const items = readdirSync(safePath, { withFileTypes: true })
@@ -1470,14 +1596,7 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.DELETE_FILE,
     async (_, filePath: string): Promise<void> => {
       const { rmSync } = await import('node:fs')
-      const { resolve } = await import('node:path')
-
-      // 安全校验：路径必须在 agent-workspaces 目录下
-      const safePath = resolve(filePath)
-      const workspacesRoot = resolve(getAgentWorkspacesDir())
-      if (!safePath.startsWith(workspacesRoot)) {
-        throw new Error('访问路径超出 Agent 工作区范围')
-      }
+      const safePath = assertPathInsideRoot(filePath, getAgentWorkspacesDir(), '访问路径超出 Agent 工作区范围')
 
       rmSync(safePath, { recursive: true, force: true })
       console.log(`[Agent 文件] 已删除: ${safePath}`)
@@ -1488,13 +1607,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.OPEN_FILE,
     async (_, filePath: string): Promise<void> => {
-      const { resolve } = await import('node:path')
-
-      const safePath = resolve(filePath)
-      const workspacesRoot = resolve(getAgentWorkspacesDir())
-      if (!safePath.startsWith(workspacesRoot)) {
-        throw new Error('访问路径超出 Agent 工作区范围')
-      }
+      const safePath = assertPathInsideRoot(filePath, getAgentWorkspacesDir(), '访问路径超出 Agent 工作区范围')
 
       await shell.openPath(safePath)
     }
@@ -1504,13 +1617,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SHOW_IN_FOLDER,
     async (_, filePath: string): Promise<void> => {
-      const { resolve } = await import('node:path')
-
-      const safePath = resolve(filePath)
-      const workspacesRoot = resolve(getAgentWorkspacesDir())
-      if (!safePath.startsWith(workspacesRoot)) {
-        throw new Error('访问路径超出 Agent 工作区范围')
-      }
+      const safePath = assertPathInsideRoot(filePath, getAgentWorkspacesDir(), '访问路径超出 Agent 工作区范围')
 
       shell.showItemInFolder(safePath)
     }
@@ -1530,15 +1637,9 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.RENAME_FILE,
     async (_, filePath: string, newName: string): Promise<void> => {
       const { renameSync } = await import('node:fs')
-      const { resolve, dirname, join } = await import('node:path')
-
-      const safePath = resolve(filePath)
-      const workspacesRoot = resolve(getAgentWorkspacesDir())
-      if (!safePath.startsWith(workspacesRoot)) {
-        throw new Error('访问路径超出 Agent 工作区范围')
-      }
-
-      const newPath = join(dirname(safePath), newName)
+      const { dirname, join } = await import('node:path')
+      const safePath = assertPathInsideRoot(filePath, getAgentWorkspacesDir(), '访问路径超出 Agent 工作区范围')
+      const newPath = assertPathInsideRoot(join(dirname(safePath), newName), getAgentWorkspacesDir(), '访问路径超出 Agent 工作区范围')
       renameSync(safePath, newPath)
       console.log(`[Agent 文件] 已重命名: ${safePath} → ${newPath}`)
     }
@@ -1549,15 +1650,9 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.MOVE_FILE,
     async (_, filePath: string, targetDir: string): Promise<void> => {
       const { renameSync } = await import('node:fs')
-      const { resolve, basename, join } = await import('node:path')
-
-      const safePath = resolve(filePath)
-      const safeTarget = resolve(targetDir)
-      const workspacesRoot = resolve(getAgentWorkspacesDir())
-      if (!safePath.startsWith(workspacesRoot) || !safeTarget.startsWith(workspacesRoot)) {
-        throw new Error('访问路径超出 Agent 工作区范围')
-      }
-
+      const { basename, join } = await import('node:path')
+      const safePath = assertPathInsideRoot(filePath, getAgentWorkspacesDir(), '访问路径超出 Agent 工作区范围')
+      const safeTarget = assertPathInsideRoot(targetDir, getAgentWorkspacesDir(), '访问路径超出 Agent 工作区范围')
       const newPath = join(safeTarget, basename(safePath))
       renameSync(safePath, newPath)
       console.log(`[Agent 文件] 已移动: ${safePath} → ${newPath}`)
@@ -1569,9 +1664,7 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.LIST_ATTACHED_DIRECTORY,
     async (_, dirPath: string): Promise<FileEntry[]> => {
       const { readdirSync } = await import('node:fs')
-      const { resolve } = await import('node:path')
-
-      const safePath = resolve(dirPath)
+      const safePath = assertPathInsideAttachedDirectories(dirPath, '访问路径不在已附加目录范围内')
       const entries: FileEntry[] = []
       const items = readdirSync(safePath, { withFileTypes: true })
 
@@ -1601,8 +1694,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.OPEN_ATTACHED_FILE,
     async (_, filePath: string): Promise<void> => {
-      const { resolve } = await import('node:path')
-      await shell.openPath(resolve(filePath))
+      const safePath = assertPathInsideAttachedDirectories(filePath, '访问路径不在已附加目录范围内')
+      await shell.openPath(safePath)
     }
   )
 
@@ -1610,8 +1703,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.SHOW_ATTACHED_IN_FOLDER,
     async (_, filePath: string): Promise<void> => {
-      const { resolve } = await import('node:path')
-      shell.showItemInFolder(resolve(filePath))
+      const safePath = assertPathInsideAttachedDirectories(filePath, '访问路径不在已附加目录范围内')
+      shell.showItemInFolder(safePath)
     }
   )
 
@@ -1620,10 +1713,9 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.RENAME_ATTACHED_FILE,
     async (_, filePath: string, newName: string): Promise<void> => {
       const { renameSync } = await import('node:fs')
-      const { resolve, dirname, join } = await import('node:path')
-
-      const safePath = resolve(filePath)
-      const newPath = join(dirname(safePath), newName)
+      const { dirname, join } = await import('node:path')
+      const safePath = assertPathInsideAttachedDirectories(filePath, '访问路径不在已附加目录范围内')
+      const newPath = assertPathInsideAttachedDirectories(join(dirname(safePath), newName), '访问路径不在已附加目录范围内')
       renameSync(safePath, newPath)
       console.log(`[附加目录] 已重命名: ${safePath} → ${newPath}`)
     }
@@ -1634,10 +1726,10 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.MOVE_ATTACHED_FILE,
     async (_, filePath: string, targetDir: string): Promise<void> => {
       const { renameSync } = await import('node:fs')
-      const { resolve, basename, join } = await import('node:path')
-
-      const safePath = resolve(filePath)
-      const newPath = join(resolve(targetDir), basename(safePath))
+      const { basename, join } = await import('node:path')
+      const safePath = assertPathInsideAttachedDirectories(filePath, '访问路径不在已附加目录范围内')
+      const safeTarget = assertPathInsideAttachedDirectories(targetDir, '访问路径不在已附加目录范围内')
+      const newPath = assertPathInsideAttachedDirectories(join(safeTarget, basename(safePath)), '访问路径不在已附加目录范围内')
       renameSync(safePath, newPath)
       console.log(`[附加目录] 已移动: ${safePath} → ${newPath}`)
     }
@@ -1648,9 +1740,15 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.SEARCH_WORKSPACE_FILES,
     async (_, rootPath: string, query: string, limit = 20, additionalPaths?: string[]): Promise<FileSearchResult> => {
       const { readdirSync } = await import('node:fs')
-      const { resolve, relative } = await import('node:path')
+      const { relative } = await import('node:path')
 
+      const workspaceRoot = getAgentWorkspacesDir()
       const safeRoot = resolve(rootPath)
+      const attachedRoots = collectAttachedDirectoryRoots()
+      const rootAllowed = isPathInsideRoot(safeRoot, workspaceRoot) || attachedRoots.some((root) => isPathInsideRoot(safeRoot, root))
+      if (!rootAllowed) {
+        throw new Error('搜索路径不在允许范围内')
+      }
       const ignoreDirs = new Set(['node_modules', '.git', 'dist', '.next', '__pycache__', '.venv', 'build', '.cache'])
 
       // 递归收集文件（限制深度 5 层）
@@ -1665,6 +1763,7 @@ export function registerIpcHandlers(): void {
             if (item.isDirectory() && ignoreDirs.has(item.name)) continue
 
             const fullPath = resolve(dir, item.name)
+            if (!isPathInsideRoot(fullPath, baseRoot)) continue
             const relPath = relative(baseRoot, fullPath)
             allEntries.push({
               name: item.name,
@@ -1686,7 +1785,7 @@ export function registerIpcHandlers(): void {
       // 扫描附加目录（外部路径）
       if (additionalPaths && additionalPaths.length > 0) {
         for (const addPath of additionalPaths) {
-          const addRoot = resolve(addPath)
+          const addRoot = assertPathInsideAttachedDirectories(addPath, '附加搜索路径不在已附加目录范围内')
           scan(addRoot, 0, addRoot)
         }
       }

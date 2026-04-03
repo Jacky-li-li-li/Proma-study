@@ -9,7 +9,8 @@
  */
 
 import { existsSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
+import { resolve } from 'node:path'
 import type { McpServerEntry } from '@proma/shared'
 
 /**
@@ -101,20 +102,45 @@ export async function validateMcpServer(
  * 2. 如果是相对命令（如 npx），使用 which 查找
  */
 async function isCommandAvailable(command: string): Promise<boolean> {
-  // 绝对路径
-  if (command.startsWith('/') || command.startsWith('\\') || /^[A-Z]:/i.test(command)) {
-    return existsSync(command)
+  const trimmed = command.trim()
+  if (!trimmed) return false
+
+  const executable = extractExecutable(trimmed)
+  if (!executable) return false
+
+  // 路径形式：直接检查文件是否存在
+  if (executable.includes('/') || executable.includes('\\') || /^[A-Z]:/i.test(executable)) {
+    return existsSync(resolve(executable))
   }
 
   // 相对命令：使用 which 查找
   try {
     // 跨平台 which 查找
     const whichCommand = process.platform === 'win32' ? 'where' : 'which'
-    execSync(`${whichCommand} ${command}`, { stdio: 'ignore' })
-    return true
+    const result = spawnSync(whichCommand, [executable], {
+      stdio: 'ignore',
+      shell: false,
+    })
+    return result.status === 0
   } catch {
     return false
   }
+}
+
+function extractExecutable(command: string): string {
+  const trimmed = command.trim()
+  if (!trimmed) return ''
+
+  const firstChar = trimmed[0]
+  if (firstChar === '"' || firstChar === '\'') {
+    const end = trimmed.indexOf(firstChar, 1)
+    if (end > 1) {
+      return trimmed.slice(1, end)
+    }
+    return trimmed.slice(1)
+  }
+
+  return trimmed.split(/\s+/)[0] ?? ''
 }
 
 /**

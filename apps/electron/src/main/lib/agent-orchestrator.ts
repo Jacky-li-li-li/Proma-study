@@ -17,11 +17,33 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, dirname, resolve, relative, isAbsolute } from 'node:path'
-import { existsSync, mkdirSync, symlinkSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, symlinkSync, readFileSync, writeFileSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { app } from 'electron'
-import type { AgentSendInput, AgentMessage, AgentGenerateTitleInput, AgentProviderAdapter, TypedError, RetryAttempt, SDKMessage, SDKAssistantMessage, AgentStreamPayload } from '@proma/shared'
+import type {
+  AgentSendInput,
+  AgentMessage,
+  AgentGenerateTitleInput,
+  AgentProviderAdapter,
+  TypedError,
+  RetryAttempt,
+  SDKMessage,
+  SDKAssistantMessage,
+  AgentStreamPayload,
+  AgentQueueMessagePriority,
+  AgentQueuedMessageSnapshot,
+  QueuedMessageMutationResult,
+  QueuedMessageStatusInput,
+  QueuedMessageStatusResult,
+  CancelQueuedMessageInput,
+  PromoteQueuedMessageInput,
+  GetTaskOutputInput,
+  GetTaskOutputResult,
+  StopTaskInput,
+  StopTaskResult,
+  AgentTaskStatus,
+} from '@proma/shared'
 import { SAFE_TOOLS } from '@proma/shared'
 import type { PermissionRequest, PromaPermissionMode, AskUserRequest, ExitPlanModeRequest } from '@proma/shared'
 import type { ClaudeAgentQueryOptions } from './adapters/claude-agent-adapter'
@@ -394,6 +416,84 @@ const DEFAULT_SESSION_TITLE = '新 Agent 会话'
 /** 默认模型 ID */
 const DEFAULT_MODEL_ID = 'claude-sonnet-4-5-20250929'
 
+/** 队列项终态 */
+const TERMINAL_QUEUE_STATES = new Set<AgentQueuedMessageSnapshot['state']>(['delivered', 'cancelled', 'failed'])
+
+/** 任务终态 */
+const TERMINAL_TASK_STATES = new Set<AgentTaskStatus>(['completed', 'failed', 'stopped'])
+
+function normalizeQueuePriority(priority?: AgentQueueMessagePriority): AgentQueueMessagePriority {
+  return priority ?? 'now'
+}
+
+function isQueueTerminal(state: AgentQueuedMessageSnapshot['state']): boolean {
+  return TERMINAL_QUEUE_STATES.has(state)
+}
+
+function isTaskTerminal(state: AgentTaskStatus): boolean {
+  return TERMINAL_TASK_STATES.has(state)
+}
+
+function formatAgentTaskStatusMessage(status: AgentTaskStatus): string {
+  switch (status) {
+    case 'pending':
+      return '任务已创建，尚未开始'
+    case 'running':
+      return '任务正在运行'
+    case 'completed':
+      return '任务已完成'
+    case 'failed':
+      return '任务已失败'
+    case 'stopped':
+      return '任务已停止'
+    default:
+      return '任务状态未知'
+  }
+}
+
+function safeReadTextFile(filePath: string): string | null {
+  try {
+    if (!existsSync(filePath)) return null
+    const stat = statSync(filePath)
+    if (!stat.isFile()) return null
+    return readFileSync(filePath, 'utf-8')
+  } catch {
+    return null
+  }
+}
+
+function resolveClaudeTaskFilePath(filePath: string): string {
+  if (isAbsolute(filePath)) return filePath
+  if (filePath.startsWith('.claude/')) return join(homedir(), filePath)
+  return join(homedir(), '.claude', filePath)
+}
+
+interface QueuedMessageRecord {
+  sessionId: string
+  messageUuid: string
+  userMessage: string
+  priority: AgentQueueMessagePriority
+  state: AgentQueuedMessageSnapshot['state']
+  createdAt: number
+  updatedAt: number
+  deliveredAt?: number
+  cancelledAt?: number
+  error?: string
+}
+
+interface TaskSnapshotRecord {
+  sessionId: string
+  taskId: string
+  toolUseId?: string
+  taskType?: string
+  description?: string
+  status: AgentTaskStatus
+  summary?: string
+  outputFile?: string
+  createdAt: number
+  updatedAt: number
+}
+
 // ===== AgentOrchestrator =====
 
 export class AgentOrchestrator {
@@ -401,8 +501,17 @@ export class AgentOrchestrator {
   private eventBus: AgentEventBus
   private activeSessions = new Set<string>()
 
-  /** 队列消息本地记录（sessionId → UUID 集合，用于防重） */
-  private queuedMessageUuids = new Map<string, Set<string>>()
+  /** 队列消息记录（sessionId → messageUuid → record） */
+  private queuedMessages = new Map<string, Map<string, QueuedMessageRecord>>()
+
+  /** 队列处理顺序（sessionId → messageUuid 列表） */
+  private queuedMessageOrders = new Map<string, string[]>()
+
+  /** 队列 drain 调度中（避免同一会话重复启动 drain） */
+  private queuedMessageDrainScheduled = new Set<string>()
+
+  /** 任务输出记录（sessionId::taskId → record） */
+  private taskSnapshots = new Map<string, TaskSnapshotRecord>()
 
   /** 被用户手动中止的会话集合（在 stop 中标记，catch block 中消费） */
   private stoppedBySessions = new Set<string>()
@@ -1472,12 +1581,27 @@ export class AgentOrchestrator {
               const sysMsg = msg as import('@proma/shared').SDKSystemMessage
               if (sysMsg.subtype === 'task_started' && sysMsg.task_id) {
                 startedTaskIds.add(sysMsg.task_id)
+                this.recordTaskSnapshot(sessionId, sysMsg.task_id, {
+                  toolUseId: sysMsg.tool_use_id,
+                  description: sysMsg.description,
+                  taskType: sysMsg.task_type,
+                  status: 'running',
+                })
               } else if (sysMsg.subtype === 'task_notification' && sysMsg.task_id) {
                 completedTaskIds.add(sysMsg.task_id)
+                const notificationStatus = (sysMsg.status as AgentTaskStatus) || 'completed'
+                this.recordTaskSnapshot(sessionId, sysMsg.task_id, {
+                  toolUseId: sysMsg.tool_use_id,
+                  description: sysMsg.description,
+                  taskType: sysMsg.task_type,
+                  status: notificationStatus,
+                  summary: sysMsg.summary,
+                  outputFile: sysMsg.output_file,
+                })
                 if (sysMsg.summary) {
                   taskNotificationSummaries.push({
                     taskId: sysMsg.task_id,
-                    status: (sysMsg.status as 'completed' | 'failed' | 'stopped') || 'completed',
+                    status: notificationStatus,
                     summary: sysMsg.summary,
                     outputFile: sysMsg.output_file,
                   })
@@ -1756,7 +1880,7 @@ export class AgentOrchestrator {
     } finally {
       this.activeSessions.delete(sessionId)
       this.sessionPermissionModes.delete(sessionId)
-      this.queuedMessageUuids.delete(sessionId)
+      this.settleQueuedMessages(sessionId, 'cancelled', '会话已结束，剩余队列已清理')
       permissionService.clearSessionPending(sessionId)
       askUserService.clearSessionPending(sessionId)
       exitPlanService.clearSessionPending(sessionId)
@@ -1773,7 +1897,7 @@ export class AgentOrchestrator {
     this.activeSessions.delete(sessionId)
     this.sessionPermissionModes.delete(sessionId)
     this.stoppedBySessions.add(sessionId)
-    this.queuedMessageUuids.delete(sessionId)
+    this.settleQueuedMessages(sessionId, 'cancelled', '会话已中止，剩余队列已清理')
     this.adapter.abort(sessionId)
     console.log(`[Agent 编排] 已中止会话: ${sessionId}`)
   }
@@ -1801,28 +1925,492 @@ export class AgentOrchestrator {
 
   /** 中止所有活跃的 Agent 会话（应用退出时调用） */
   stopAll(): void {
-    if (this.activeSessions.size === 0) return
+    if (this.activeSessions.size === 0 && this.queuedMessages.size === 0) return
     console.log(`[Agent 编排] 正在中止所有活跃会话 (${this.activeSessions.size} 个)...`)
+    for (const sessionId of new Set([...this.activeSessions, ...this.queuedMessages.keys()])) {
+      this.settleQueuedMessages(sessionId, 'cancelled', '应用已退出，剩余队列已清理')
+    }
     this.adapter.dispose()
     this.activeSessions.clear()
     this.sessionPermissionModes.clear()
-    this.queuedMessageUuids.clear()
+    this.queuedMessageDrainScheduled.clear()
   }
 
   // ===== 队列消息管理 =====
 
+  private getQueuedMessageRecords(sessionId: string): Map<string, QueuedMessageRecord> {
+    let records = this.queuedMessages.get(sessionId)
+    if (!records) {
+      records = new Map<string, QueuedMessageRecord>()
+      this.queuedMessages.set(sessionId, records)
+    }
+    return records
+  }
+
+  private getQueuedMessageOrder(sessionId: string): string[] {
+    let order = this.queuedMessageOrders.get(sessionId)
+    if (!order) {
+      order = []
+      this.queuedMessageOrders.set(sessionId, order)
+    }
+    return order
+  }
+
+  private snapshotQueuedMessage(record: QueuedMessageRecord): AgentQueuedMessageSnapshot {
+    return {
+      sessionId: record.sessionId,
+      messageUuid: record.messageUuid,
+      userMessage: record.userMessage,
+      priority: record.priority,
+      state: record.state,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      ...(record.deliveredAt != null && { deliveredAt: record.deliveredAt }),
+      ...(record.cancelledAt != null && { cancelledAt: record.cancelledAt }),
+      ...(record.error && { error: record.error }),
+    }
+  }
+
+  private findQueuedMessageRecord(sessionId: string, messageUuid: string): QueuedMessageRecord | undefined {
+    return this.queuedMessages.get(sessionId)?.get(messageUuid)
+  }
+
+  private findNextQueuedMessage(sessionId: string): QueuedMessageRecord | undefined {
+    const order = this.queuedMessageOrders.get(sessionId) ?? []
+    const records = this.queuedMessages.get(sessionId)
+    if (!records || order.length === 0) return undefined
+
+    for (const uuid of order) {
+      const record = records.get(uuid)
+      if (!record) continue
+      if (isQueueTerminal(record.state)) continue
+      return record
+    }
+    return undefined
+  }
+
+  private removeQueuedMessageFromOrder(sessionId: string, messageUuid: string): void {
+    const order = this.queuedMessageOrders.get(sessionId)
+    if (!order) return
+    const nextOrder = order.filter((uuid) => uuid !== messageUuid)
+    if (nextOrder.length === 0) {
+      this.queuedMessageOrders.delete(sessionId)
+    } else {
+      this.queuedMessageOrders.set(sessionId, nextOrder)
+    }
+  }
+
+  private ensureQueuedMessageRecord(
+    sessionId: string,
+    text: string,
+    priority: AgentQueueMessagePriority,
+    presetUuid?: string,
+  ): QueuedMessageRecord {
+    const uuid = presetUuid || randomUUID()
+    const records = this.getQueuedMessageRecords(sessionId)
+    const existing = records.get(uuid)
+    if (existing) {
+      return existing
+    }
+
+    const now = Date.now()
+    const record: QueuedMessageRecord = {
+      sessionId,
+      messageUuid: uuid,
+      userMessage: text,
+      priority,
+      state: 'queued',
+      createdAt: now,
+      updatedAt: now,
+    }
+    records.set(uuid, record)
+    this.getQueuedMessageOrder(sessionId).push(uuid)
+    return record
+  }
+
+  private async flushQueuedMessages(sessionId: string): Promise<void> {
+    if (!this.activeSessions.has(sessionId)) return
+
+    while (this.activeSessions.has(sessionId)) {
+      const record = this.findNextQueuedMessage(sessionId)
+      if (!record) break
+
+      if (record.state === 'cancelled' || record.state === 'delivered' || record.state === 'failed') {
+        this.removeQueuedMessageFromOrder(sessionId, record.messageUuid)
+        continue
+      }
+
+      if (record.state === 'queued' || record.state === 'promoted') {
+        record.state = 'delivering'
+        record.updatedAt = Date.now()
+      }
+
+      const adapterSendQueuedMessage = this.adapter.sendQueuedMessage
+      if (!adapterSendQueuedMessage) {
+        record.state = 'failed'
+        record.updatedAt = Date.now()
+        record.error = '当前适配器不支持流式追加消息'
+        this.removeQueuedMessageFromOrder(sessionId, record.messageUuid)
+        continue
+      }
+
+      const sdkMessage = {
+        type: 'user' as const,
+        message: { role: 'user' as const, content: record.userMessage },
+        parent_tool_use_id: null,
+        priority: record.priority,
+        uuid: record.messageUuid,
+        session_id: sessionId,
+      }
+
+      try {
+        await adapterSendQueuedMessage.call(this.adapter, sessionId, sdkMessage)
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        const currentState = record.state as QueuedMessageRecord['state']
+        if (currentState !== 'cancelled') {
+          record.state = 'failed'
+          record.error = errorMessage
+          record.updatedAt = Date.now()
+        }
+        this.removeQueuedMessageFromOrder(sessionId, record.messageUuid)
+        continue
+      }
+
+      const stateAfterSend = record.state as QueuedMessageRecord['state']
+      if (stateAfterSend === 'cancelled') {
+        this.removeQueuedMessageFromOrder(sessionId, record.messageUuid)
+        continue
+      }
+
+      record.state = 'delivered'
+      record.deliveredAt = Date.now()
+      record.updatedAt = record.deliveredAt
+      this.removeQueuedMessageFromOrder(sessionId, record.messageUuid)
+
+      const persistMsg: SDKMessage = {
+        type: 'user',
+        uuid: record.messageUuid,
+        message: {
+          content: [{ type: 'text', text: record.userMessage }],
+        },
+        parent_tool_use_id: null,
+        _createdAt: Date.now(),
+      } as unknown as SDKMessage
+      appendSDKMessages(sessionId, [persistMsg])
+      console.log(`[Agent 编排] 追加消息已注入: sessionId=${sessionId}, uuid=${record.messageUuid}`)
+    }
+  }
+
+  private scheduleQueuedMessageDrain(sessionId: string): void {
+    if (this.queuedMessageDrainScheduled.has(sessionId)) return
+    this.queuedMessageDrainScheduled.add(sessionId)
+    queueMicrotask(() => {
+      void (async () => {
+        try {
+          await this.flushQueuedMessages(sessionId)
+        } catch (error) {
+          console.error(`[Agent 编排] 队列刷新失败: sessionId=${sessionId}`, error)
+        } finally {
+          this.queuedMessageDrainScheduled.delete(sessionId)
+          if (this.activeSessions.has(sessionId) && this.findNextQueuedMessage(sessionId)) {
+            this.scheduleQueuedMessageDrain(sessionId)
+          }
+        }
+      })()
+    })
+  }
+
+  private settleQueuedMessages(sessionId: string, state: 'cancelled' | 'failed', reason: string): void {
+    const records = this.queuedMessages.get(sessionId)
+    if (!records || records.size === 0) return
+    const now = Date.now()
+    for (const record of records.values()) {
+      if (isQueueTerminal(record.state)) continue
+      record.state = state
+      record.updatedAt = now
+      record.error = reason
+      if (state === 'cancelled') {
+        record.cancelledAt = now
+      }
+    }
+    this.queuedMessageOrders.delete(sessionId)
+  }
+
+  private recordTaskSnapshot(
+    sessionId: string,
+    taskId: string,
+    update: Partial<Omit<TaskSnapshotRecord, 'sessionId' | 'taskId' | 'createdAt'>>,
+  ): TaskSnapshotRecord {
+    const key = `${sessionId}::${taskId}`
+    const now = Date.now()
+    const existing = this.taskSnapshots.get(key)
+    const next: TaskSnapshotRecord = existing
+      ? { ...existing, ...update, updatedAt: now }
+      : {
+          sessionId,
+          taskId,
+          status: 'pending',
+          createdAt: now,
+          updatedAt: now,
+          ...update,
+        }
+    this.taskSnapshots.set(key, next)
+    return next
+  }
+
+  private findTaskSnapshot(taskId: string, sessionId?: string): TaskSnapshotRecord | undefined {
+    if (sessionId) {
+      return this.taskSnapshots.get(`${sessionId}::${taskId}`)
+    }
+    let latest: TaskSnapshotRecord | undefined
+    for (const record of this.taskSnapshots.values()) {
+      if (record.taskId !== taskId) continue
+      if (!latest || record.updatedAt > latest.updatedAt) {
+        latest = record
+      }
+    }
+    return latest
+  }
+
+  private readTaskOutput(record: TaskSnapshotRecord): string {
+    const sourcePath = record.outputFile ? resolveClaudeTaskFilePath(record.outputFile) : null
+    if (sourcePath) {
+      const text = safeReadTextFile(sourcePath)
+      if (text != null && text.trim().length > 0) {
+        return text
+      }
+    }
+
+    const pieces = [
+      `Task ID: ${record.taskId}`,
+      `Session ID: ${record.sessionId}`,
+      `状态: ${formatAgentTaskStatusMessage(record.status)}`,
+      record.description ? `描述: ${record.description}` : null,
+      record.summary ? `摘要: ${record.summary}` : null,
+      record.outputFile ? `输出文件: ${record.outputFile}` : null,
+      sourcePath ? `输出文件路径: ${sourcePath}` : null,
+    ].filter(Boolean)
+
+    return pieces.join('\n')
+  }
+
+  getQueuedMessageStatus(input: QueuedMessageStatusInput): QueuedMessageStatusResult {
+    const records = this.queuedMessages.get(input.sessionId)
+    if (!records || records.size === 0) {
+      return {
+        status: 'not_found',
+        message: '当前会话没有队列消息',
+        pendingCount: 0,
+        queuedMessages: [],
+      }
+    }
+
+    const allRecords = [...records.values()]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((record) => this.snapshotQueuedMessage(record))
+
+    const pendingCount = allRecords.filter((record) => record.state === 'queued' || record.state === 'promoted' || record.state === 'delivering').length
+
+    if (input.messageUuid) {
+      const record = records.get(input.messageUuid)
+      if (!record) {
+        return {
+          status: 'not_found',
+          message: `未找到队列消息: ${input.messageUuid}`,
+          pendingCount,
+          queuedMessages: allRecords,
+        }
+      }
+      const snapshot = this.snapshotQueuedMessage(record)
+      return {
+        status: 'ok',
+        message: `队列消息状态: ${snapshot.state}`,
+        pendingCount,
+        queuedMessage: snapshot,
+        queuedMessages: allRecords,
+      }
+    }
+
+    return {
+      status: 'ok',
+      message: `当前会话共有 ${allRecords.length} 条队列消息，其中 ${pendingCount} 条待处理`,
+      pendingCount,
+      queuedMessages: allRecords,
+    }
+  }
+
+  cancelQueuedMessage(input: CancelQueuedMessageInput): QueuedMessageMutationResult {
+    const record = this.findQueuedMessageRecord(input.sessionId, input.messageUuid)
+    if (!record) {
+      return {
+        status: 'not_found',
+        message: `未找到队列消息: ${input.messageUuid}`,
+      }
+    }
+
+    if (record.state === 'cancelled') {
+      return {
+        status: 'already_cancelled',
+        message: `队列消息已取消: ${input.messageUuid}`,
+        queuedMessage: this.snapshotQueuedMessage(record),
+      }
+    }
+
+    if (record.state === 'delivered') {
+      return {
+        status: 'already_delivered',
+        message: `队列消息已发送: ${input.messageUuid}`,
+        queuedMessage: this.snapshotQueuedMessage(record),
+      }
+    }
+
+    if (record.state === 'failed') {
+      return {
+        status: 'already_failed',
+        message: `队列消息已失败: ${input.messageUuid}`,
+        queuedMessage: this.snapshotQueuedMessage(record),
+      }
+    }
+
+    record.state = 'cancelled'
+    record.cancelledAt = Date.now()
+    record.updatedAt = record.cancelledAt
+    record.error = '用户取消'
+    this.removeQueuedMessageFromOrder(input.sessionId, input.messageUuid)
+
+    void this.adapter.cancelQueuedMessage?.(input.sessionId, input.messageUuid).catch((error) => {
+      console.warn(`[Agent 编排] 取消队列消息失败: sessionId=${input.sessionId}, uuid=${input.messageUuid}`, error)
+    })
+
+    return {
+      status: 'ok',
+      message: `已取消队列消息: ${input.messageUuid}`,
+      queuedMessage: this.snapshotQueuedMessage(record),
+    }
+  }
+
+  promoteQueuedMessage(input: PromoteQueuedMessageInput): QueuedMessageMutationResult {
+    const record = this.findQueuedMessageRecord(input.sessionId, input.messageUuid)
+    if (!record) {
+      return {
+        status: 'not_found',
+        message: `未找到队列消息: ${input.messageUuid}`,
+      }
+    }
+
+    if (record.state === 'cancelled') {
+      return {
+        status: 'already_cancelled',
+        message: `队列消息已取消，无法提升: ${input.messageUuid}`,
+        queuedMessage: this.snapshotQueuedMessage(record),
+      }
+    }
+
+    if (record.state === 'delivered') {
+      return {
+        status: 'already_delivered',
+        message: `队列消息已发送，无法提升: ${input.messageUuid}`,
+        queuedMessage: this.snapshotQueuedMessage(record),
+      }
+    }
+
+    if (record.state === 'failed') {
+      return {
+        status: 'already_failed',
+        message: `队列消息已失败，无法提升: ${input.messageUuid}`,
+        queuedMessage: this.snapshotQueuedMessage(record),
+      }
+    }
+
+    record.priority = 'now'
+    record.state = 'promoted'
+    record.updatedAt = Date.now()
+
+    const order = this.getQueuedMessageOrder(input.sessionId)
+    const nextOrder = [input.messageUuid, ...order.filter((uuid) => uuid !== input.messageUuid)]
+    this.queuedMessageOrders.set(input.sessionId, nextOrder)
+
+    this.scheduleQueuedMessageDrain(input.sessionId)
+
+    return {
+      status: 'ok',
+      message: `已提升队列消息: ${input.messageUuid}`,
+      queuedMessage: this.snapshotQueuedMessage(record),
+    }
+  }
+
+  async getTaskOutput(input: GetTaskOutputInput): Promise<GetTaskOutputResult> {
+    const record = this.findTaskSnapshot(input.taskId, input.sessionId)
+    if (!record) {
+      return {
+        status: 'not_found',
+        message: `未找到任务: ${input.taskId}`,
+        output: '',
+        isComplete: false,
+        taskStatus: 'unknown',
+      }
+    }
+
+    const output = this.readTaskOutput(record)
+    const isComplete = isTaskTerminal(record.status)
+    return {
+      status: 'ok',
+      message: `已获取任务输出: ${input.taskId}`,
+      output,
+      isComplete,
+      taskStatus: record.status,
+    }
+  }
+
+  async stopTask(input: StopTaskInput): Promise<StopTaskResult> {
+    const record = this.findTaskSnapshot(input.taskId, input.sessionId)
+    if (!record) {
+      return {
+        status: 'not_found',
+        message: `未找到任务: ${input.taskId}`,
+        stopped: false,
+        taskStatus: 'unknown',
+      }
+    }
+
+    if (input.type === 'shell') {
+      return {
+        status: 'not_supported',
+        message: 'Shell 任务当前不支持通过主进程单独停止',
+        stopped: false,
+        taskStatus: record.status,
+      }
+    }
+
+    if (isTaskTerminal(record.status)) {
+      return {
+        status: 'ok',
+        message: `任务已结束，无需停止: ${input.taskId}`,
+        stopped: false,
+        taskStatus: record.status,
+      }
+    }
+
+    return {
+      status: 'not_supported',
+      message: 'Agent 子任务当前不支持通过主进程单独停止',
+      stopped: false,
+      taskStatus: record.status,
+    }
+  }
+
   /**
    * 流式追加消息
    *
-   * 在 Agent 运行中注入用户消息到 SDK，使用 'now' 优先级立即处理。
-   * 消息立即持久化到 JSONL。
+   * 在 Agent 运行中排队追加用户消息，队列会尽快注入到 SDK。
    *
    * @returns 消息 UUID
    */
   async queueMessage(
     sessionId: string,
     text: string,
-    _priority?: string,
+    priority?: AgentQueueMessagePriority,
     presetUuid?: string,
   ): Promise<string> {
     if (!this.activeSessions.has(sessionId)) {
@@ -1833,43 +2421,14 @@ export class AgentOrchestrator {
       throw new Error('[Agent 编排] 当前适配器不支持流式追加消息')
     }
 
-    const uuid = presetUuid || randomUUID()
-
-    // 防重记录
-    const uuids = this.queuedMessageUuids.get(sessionId) ?? new Set<string>()
-    uuids.add(uuid)
-    this.queuedMessageUuids.set(sessionId, uuids)
-
-    // 构造 SDKUserMessage 并注入（强制 'now' 优先级）
-    const sdkMessage = {
-      type: 'user' as const,
-      message: { role: 'user' as const, content: text },
-      parent_tool_use_id: null,
-      priority: 'now' as const,
-      uuid,
-      session_id: sessionId,
+    const normalizedPriority = normalizeQueuePriority(priority)
+    const record = this.ensureQueuedMessageRecord(sessionId, text, normalizedPriority, presetUuid)
+    if (record.state === 'queued' || record.state === 'promoted') {
+      record.priority = normalizedPriority
+      record.updatedAt = Date.now()
     }
 
-    try {
-      await this.adapter.sendQueuedMessage(sessionId, sdkMessage)
-      console.log(`[Agent 编排] 追加消息已注入: sessionId=${sessionId}, uuid=${uuid}`)
-
-      // 立即持久化到 JSONL
-      const persistMsg: SDKMessage = {
-        type: 'user',
-        uuid,
-        message: {
-          content: [{ type: 'text', text }],
-        },
-        parent_tool_use_id: null,
-        _createdAt: Date.now(),
-      } as unknown as SDKMessage
-      appendSDKMessages(sessionId, [persistMsg])
-    } catch (error) {
-      uuids.delete(uuid)
-      throw error
-    }
-
-    return uuid
+    this.scheduleQueuedMessageDrain(sessionId)
+    return record.messageUuid
   }
 }

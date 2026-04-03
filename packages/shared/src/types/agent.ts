@@ -707,6 +707,70 @@ export interface AgentQueueMessageInput {
   userMessage: string
   /** 前端预生成的 UUID（用于乐观更新去重） */
   uuid?: string
+  /** 队列优先级（默认 now） */
+  priority?: AgentQueueMessagePriority
+}
+
+/** 队列消息优先级 */
+export type AgentQueueMessagePriority = 'now' | 'next' | 'later'
+
+/** 队列消息状态 */
+export type AgentQueuedMessageState = 'queued' | 'promoted' | 'delivering' | 'delivered' | 'cancelled' | 'failed'
+
+/** 队列操作结果状态 */
+export type AgentQueueOperationStatus =
+  | 'ok'
+  | 'not_found'
+  | 'already_cancelled'
+  | 'already_delivered'
+  | 'already_failed'
+  | 'in_progress'
+  | 'unsupported'
+  | 'failed'
+
+/** 队列消息快照 */
+export interface AgentQueuedMessageSnapshot {
+  sessionId: string
+  messageUuid: string
+  userMessage: string
+  priority: AgentQueueMessagePriority
+  state: AgentQueuedMessageState
+  createdAt: number
+  updatedAt: number
+  deliveredAt?: number
+  cancelledAt?: number
+  error?: string
+}
+
+/** 查询队列消息状态输入 */
+export interface QueuedMessageStatusInput {
+  sessionId: string
+  messageUuid?: string
+}
+
+/** 队列消息变更结果 */
+export interface QueuedMessageMutationResult {
+  status: AgentQueueOperationStatus
+  message: string
+  queuedMessage?: AgentQueuedMessageSnapshot
+}
+
+/** 队列消息状态查询结果 */
+export interface QueuedMessageStatusResult extends QueuedMessageMutationResult {
+  pendingCount: number
+  queuedMessages?: AgentQueuedMessageSnapshot[]
+}
+
+/** 取消队列消息输入 */
+export interface CancelQueuedMessageInput {
+  sessionId: string
+  messageUuid: string
+}
+
+/** 提升队列消息输入 */
+export interface PromoteQueuedMessageInput {
+  sessionId: string
+  messageUuid: string
 }
 
 // ===== 会话迁移输入 =====
@@ -737,18 +801,34 @@ export interface ForkSessionInput {
 export interface GetTaskOutputInput {
   /** 任务 ID */
   taskId: string
+  /** 可选的会话 ID，用于缩小查询范围 */
+  sessionId?: string
   /** 是否阻塞等待完成（默认 false） */
   block?: boolean
+}
+
+/** 任务操作结果状态 */
+export type AgentTaskOperationStatus = 'ok' | 'not_found' | 'not_supported' | 'failed'
+
+/** 任务执行状态 */
+export type AgentTaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'stopped' | 'unknown'
+
+/** 任务协议基础结果 */
+export interface AgentTaskOperationResult {
+  status?: AgentTaskOperationStatus
+  message?: string
 }
 
 /**
  * 获取任务输出响应
  */
-export interface GetTaskOutputResult {
+export interface GetTaskOutputResult extends AgentTaskOperationResult {
   /** 任务输出内容 */
   output: string
   /** 任务是否已完成 */
   isComplete: boolean
+  /** 任务当前状态 */
+  taskStatus?: AgentTaskStatus
 }
 
 /**
@@ -761,6 +841,16 @@ export interface StopTaskInput {
   taskId: string
   /** 任务类型 */
   type: 'agent' | 'shell'
+}
+
+/**
+ * 停止任务响应
+ */
+export interface StopTaskResult extends AgentTaskOperationResult {
+  /** 是否已停止 */
+  stopped: boolean
+  /** 任务当前状态 */
+  taskStatus?: AgentTaskStatus
 }
 
 // ===== Agent 流式事件载荷 =====

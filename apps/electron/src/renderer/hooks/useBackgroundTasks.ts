@@ -13,6 +13,7 @@ import {
   backgroundTasksAtomFamily,
   type BackgroundTask,
 } from '@/atoms/agent-atoms'
+import type { StopTaskResult } from '@proma/shared'
 
 export interface UseBackgroundTasksResult {
   /** 当前会话的后台任务列表 */
@@ -28,7 +29,7 @@ export interface UseBackgroundTasksResult {
   removeTask: (toolUseId: string) => void
 
   /** 停止任务 */
-  stopTask: (taskId: string, type: 'agent' | 'shell') => Promise<void>
+  stopTask: (taskId: string, type: 'agent' | 'shell') => Promise<StopTaskResult>
 }
 
 /**
@@ -92,17 +93,20 @@ export function useBackgroundTasks(sessionId: string): UseBackgroundTasksResult 
   const stopTask = useCallback(
     async (taskId: string, type: 'agent' | 'shell') => {
       try {
-        await window.electronAPI.stopTask({
+        const result = await window.electronAPI.stopTask({
           sessionId,
           taskId,
           type,
         })
 
-        // 停止成功后，通过 toolUseId 移除任务
-        const task = tasks.find((t) => t.id === taskId)
-        if (task) {
-          removeTask(task.toolUseId)
+        // 明确按协议结果处理：只有确认停止/结束才移除任务
+        if (result.stopped || result.taskStatus === 'stopped' || result.taskStatus === 'completed' || result.taskStatus === 'failed') {
+          const task = tasks.find((t) => t.id === taskId)
+          if (task) {
+            removeTask(task.toolUseId)
+          }
         }
+        return result
       } catch (error) {
         console.error('[useBackgroundTasks] 停止任务失败:', error)
         throw error
