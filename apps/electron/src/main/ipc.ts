@@ -271,6 +271,29 @@ function assertPathInsideAttachedDirectories(targetPath: string, errorMessage: s
   return safeTarget
 }
 
+async function openDirectoryInFinderWithParentHistory(directoryPath: string): Promise<void> {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const execFileAsync = promisify(execFile)
+  const escapedPath = directoryPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+
+  const script = `
+set targetFolder to POSIX file "${escapedPath}" as alias
+tell application "Finder"
+  activate
+  set parentFolder to container of targetFolder
+  if (count of Finder windows) is 0 then
+    make new Finder window to parentFolder
+  else
+    set target of front Finder window to parentFolder
+  end if
+  set target of front Finder window to targetFolder
+end tell
+`
+
+  await execFileAsync('osascript', ['-e', script])
+}
+
 /**
  * 注册 IPC 处理器
  *
@@ -1608,6 +1631,15 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.OPEN_FILE,
     async (_, filePath: string): Promise<void> => {
       const safePath = assertPathInsideRoot(filePath, getAgentWorkspacesDir(), '访问路径超出 Agent 工作区范围')
+
+      if (process.platform === 'darwin' && statSync(safePath).isDirectory()) {
+        try {
+          await openDirectoryInFinderWithParentHistory(safePath)
+          return
+        } catch (error) {
+          console.warn('[IPC] Finder 历史导航打开目录失败，回退 shell.openPath:', error)
+        }
+      }
 
       await shell.openPath(safePath)
     }

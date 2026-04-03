@@ -19,7 +19,6 @@ import {
   allPendingExitPlanRequestsAtom,
   agentPromptSuggestionsAtom,
   backgroundTasksAtomFamily,
-  agentSidePanelOpenMapAtom,
   applyAgentEvent,
   liveMessagesMapAtom,
   agentPermissionModeMapAtom,
@@ -349,18 +348,6 @@ export function useGlobalAgentListeners(): void {
             map.set(sessionId, next)
             return map
           })
-
-          // 自动打开侧面板：检测到 Agent/Task 工具启动或 teammate 任务开始时
-          if (
-            (event.type === 'tool_start' && (event.toolName === 'Agent' || event.toolName === 'Task')) ||
-            event.type === 'task_started'
-          ) {
-            store.set(agentSidePanelOpenMapAtom, (prev) => {
-              const map = new Map(prev)
-              map.set(sessionId, true)
-              return map
-            })
-          }
 
           // 处理后台任务事件
           if (event.type === 'task_backgrounded') {

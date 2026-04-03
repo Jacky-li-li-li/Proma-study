@@ -9,6 +9,7 @@ import { useAtomValue, useSetAtom } from 'jotai'
 import { X, FolderOpen, ExternalLink, RefreshCw, ChevronRight, MoreHorizontal, FolderSearch, Pencil, FolderInput, Info, FolderHeart } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -20,12 +21,15 @@ import { FileBrowser, FileDropZone, FileTypeIcon } from '@/components/file-brows
 import {
   agentSidePanelOpenMapAtom,
   agentSidePanelManualCollapseLockMapAtom,
+  agentSidePanelActiveTabMapAtom,
+  agentSidePanelWidthMapAtom,
+  openAgentSidePanelAtom,
   workspaceFilesVersionAtom,
-  workspaceNewFilesVersionAtom,
   currentAgentWorkspaceIdAtom,
   agentWorkspacesAtom,
   agentAttachedDirectoriesMapAtom,
   workspaceAttachedDirectoriesMapAtom,
+  type AgentSidePanelTab,
 } from '@/atoms/agent-atoms'
 import type { FileEntry } from '@proma/shared'
 
@@ -34,37 +38,41 @@ interface SidePanelProps {
   sessionPath: string | null
 }
 
+const SIDE_PANEL_DEFAULT_WIDTH = 320
+const SIDE_PANEL_MIN_WIDTH = 280
+const SIDE_PANEL_MAX_WIDTH = 480
+const SIDE_PANEL_TRANSITION_MS = 220
+
+function clampSidePanelWidth(width: number): number {
+  return Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(SIDE_PANEL_MAX_WIDTH, width))
+}
+
 export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.ReactElement {
-  // per-session 侧面板状态（默认收起）
   const sidePanelOpenMap = useAtomValue(agentSidePanelOpenMapAtom)
   const setSidePanelOpenMap = useSetAtom(agentSidePanelOpenMapAtom)
-  const sidePanelManualCollapseLockMap = useAtomValue(agentSidePanelManualCollapseLockMapAtom)
+  const sidePanelActiveTabMap = useAtomValue(agentSidePanelActiveTabMapAtom)
+  const setSidePanelActiveTabMap = useSetAtom(agentSidePanelActiveTabMapAtom)
+  const sidePanelWidthMap = useAtomValue(agentSidePanelWidthMapAtom)
+  const setSidePanelWidthMap = useSetAtom(agentSidePanelWidthMapAtom)
+  const openAgentSidePanel = useSetAtom(openAgentSidePanelAtom)
   const setSidePanelManualCollapseLockMap = useSetAtom(agentSidePanelManualCollapseLockMapAtom)
 
   const isOpen = sidePanelOpenMap.get(sessionId) ?? false
-  const isManualCollapseLocked = sidePanelManualCollapseLockMap.get(sessionId) ?? false
+  const activeTab = sidePanelActiveTabMap.get(sessionId) ?? 'session'
+  const panelWidth = clampSidePanelWidth(sidePanelWidthMap.get(sessionId) ?? SIDE_PANEL_DEFAULT_WIDTH)
+  const [isResizing, setIsResizing] = React.useState(false)
+  const rootRef = React.useRef<HTMLDivElement>(null)
+  const contentRef = React.useRef<HTMLDivElement>(null)
+  const resizeFrameRef = React.useRef<number | null>(null)
+  const resizePendingWidthRef = React.useRef(panelWidth)
 
-  // 动画标志：仅用户手动点击时启用过渡动画，切换对话时即时显示
-  const animateRef = React.useRef(false)
-  const prevOpenRef = React.useRef(isOpen)
-  const prevTransitionOpenRef = React.useRef(isOpen)
-  const transitionTimerRef = React.useRef<number | null>(null)
-
-  // sessionId 变化时重置动画标志（切换会话时保持即时显示，避免误动画）
   React.useEffect(() => {
-    animateRef.current = false
-    prevOpenRef.current = isOpen
-    prevTransitionOpenRef.current = isOpen
-  }, [sessionId])
-
-  // 只要开关状态变化，就启用过渡动画（覆盖 TabBar 按钮触发路径）
-  React.useEffect(() => {
-    if (prevOpenRef.current === isOpen) return
-    animateRef.current = true
-    prevOpenRef.current = isOpen
-  }, [isOpen])
+    resizePendingWidthRef.current = panelWidth
+  }, [panelWidth, sessionId])
 
   // 右侧面板开合期间广播布局过渡，供消息导航等组件暂避抖动
+  const prevTransitionOpenRef = React.useRef(isOpen)
+  const transitionTimerRef = React.useRef<number | null>(null)
   React.useEffect(() => {
     if (prevTransitionOpenRef.current === isOpen) return
     prevTransitionOpenRef.current = isOpen
@@ -77,7 +85,7 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
     transitionTimerRef.current = window.setTimeout(() => {
       window.dispatchEvent(new CustomEvent('proma:sidebar-transition', { detail: { active: false } }))
       transitionTimerRef.current = null
-    }, 320)
+    }, SIDE_PANEL_TRANSITION_MS)
   }, [isOpen])
 
   React.useEffect(() => {
@@ -86,59 +94,28 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
         window.clearTimeout(transitionTimerRef.current)
         transitionTimerRef.current = null
       }
+      if (resizeFrameRef.current != null) {
+        window.cancelAnimationFrame(resizeFrameRef.current)
+        resizeFrameRef.current = null
+      }
       window.dispatchEvent(new CustomEvent('proma:sidebar-transition', { detail: { active: false } }))
     }
   }, [])
 
-  const setPanelOpen = React.useCallback((nextOpen: boolean, source: 'manual' | 'auto') => {
-    setSidePanelOpenMap((prev) => {
-      const current = prev.get(sessionId) ?? false
-      if (current === nextOpen) return prev
-      const map = new Map(prev)
-      map.set(sessionId, nextOpen)
-      return map
-    })
-
-    if (source !== 'manual') return
-
-    setSidePanelManualCollapseLockMap((prev) => {
-      const map = new Map(prev)
-      if (nextOpen) {
-        // 用户主动展开后，解除“手动收起锁”
-        map.delete(sessionId)
-      } else {
-        // 用户主动收起后，本会话内不再因新文件自动展开
-        map.set(sessionId, true)
-      }
-      return map
-    })
-  }, [sessionId, setSidePanelOpenMap, setSidePanelManualCollapseLockMap])
-
-  const handleToggleOpen = React.useCallback(() => {
-    setPanelOpen(!isOpen, 'manual')
-  }, [isOpen, setPanelOpen])
-
   const filesVersion = useAtomValue(workspaceFilesVersionAtom)
   const setFilesVersion = useSetAtom(workspaceFilesVersionAtom)
-  const newFilesVersion = useAtomValue(workspaceNewFilesVersionAtom)
-  const setNewFilesVersion = useSetAtom(workspaceNewFilesVersionAtom)
-
-  // 派生当前工作区 slug（用于 FileDropZone IPC 调用）
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const workspaceSlug = workspaces.find((w) => w.id === currentWorkspaceId)?.slug ?? null
 
-  // 附加目录列表（会话级）
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
   const setAttachedDirsMap = useSetAtom(agentAttachedDirectoriesMapAtom)
   const attachedDirs = attachedDirsMap.get(sessionId) ?? []
 
-  // 附加目录列表（工作区级）
   const wsAttachedDirsMap = useAtomValue(workspaceAttachedDirectoriesMapAtom)
   const setWsAttachedDirsMap = useSetAtom(workspaceAttachedDirectoriesMapAtom)
   const wsAttachedDirs = currentWorkspaceId ? (wsAttachedDirsMap.get(currentWorkspaceId) ?? []) : []
 
-  // 加载工作区级附加目录
   React.useEffect(() => {
     if (!workspaceSlug || !currentWorkspaceId) return
     window.electronAPI.getWorkspaceDirectories(workspaceSlug)
@@ -151,6 +128,105 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
       })
       .catch(console.error)
   }, [workspaceSlug, currentWorkspaceId, setWsAttachedDirsMap])
+
+  const setActiveTab = React.useCallback((nextTab: AgentSidePanelTab) => {
+    setSidePanelActiveTabMap((prev) => {
+      const current = prev.get(sessionId) ?? 'session'
+      if (current === nextTab) return prev
+      const map = new Map(prev)
+      map.set(sessionId, nextTab)
+      return map
+    })
+  }, [sessionId, setSidePanelActiveTabMap])
+
+  const handleClosePanel = React.useCallback(() => {
+    setSidePanelOpenMap((prev) => {
+      const current = prev.get(sessionId) ?? false
+      if (!current) return prev
+      const map = new Map(prev)
+      map.set(sessionId, false)
+      return map
+    })
+    setSidePanelManualCollapseLockMap((prev) => {
+      if (prev.get(sessionId) === true) return prev
+      const map = new Map(prev)
+      map.set(sessionId, true)
+      return map
+    })
+  }, [sessionId, setSidePanelOpenMap, setSidePanelManualCollapseLockMap])
+
+  const updatePanelWidth = React.useCallback((nextWidth: number) => {
+    const clamped = clampSidePanelWidth(nextWidth)
+    setSidePanelWidthMap((prev) => {
+      const current = clampSidePanelWidth(prev.get(sessionId) ?? SIDE_PANEL_DEFAULT_WIDTH)
+      if (current === clamped) return prev
+      const map = new Map(prev)
+      map.set(sessionId, clamped)
+      return map
+    })
+  }, [sessionId, setSidePanelWidthMap])
+
+  const handleResizePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isOpen) return
+    event.preventDefault()
+    event.stopPropagation()
+
+    const startX = event.clientX
+    const startWidth = panelWidth
+    let latestWidth = startWidth
+    const prevCursor = document.body.style.cursor
+    const prevUserSelect = document.body.style.userSelect
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    setIsResizing(true)
+
+    const applyWidthToDom = (nextWidth: number): void => {
+      if (rootRef.current) rootRef.current.style.width = `${nextWidth}px`
+      if (contentRef.current) contentRef.current.style.width = `${nextWidth}px`
+    }
+
+    const scheduleWidthApply = (nextWidth: number): void => {
+      latestWidth = nextWidth
+      resizePendingWidthRef.current = nextWidth
+      if (resizeFrameRef.current != null) return
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null
+        applyWidthToDom(latestWidth)
+      })
+    }
+
+    const handlePointerMove = (moveEvent: PointerEvent): void => {
+      const delta = startX - moveEvent.clientX
+      scheduleWidthApply(clampSidePanelWidth(startWidth + delta))
+    }
+
+    const handlePointerUp = (): void => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerUp)
+      if (resizeFrameRef.current != null) {
+        window.cancelAnimationFrame(resizeFrameRef.current)
+        resizeFrameRef.current = null
+      }
+      applyWidthToDom(resizePendingWidthRef.current)
+      updatePanelWidth(resizePendingWidthRef.current)
+      document.body.style.cursor = prevCursor
+      document.body.style.userSelect = prevUserSelect
+      setIsResizing(false)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerUp)
+  }, [isOpen, panelWidth, updatePanelWidth])
+
+  const openByLocalFileAdded = React.useCallback((tab: AgentSidePanelTab) => {
+    openAgentSidePanel({
+      sessionId,
+      reason: 'local_file_added',
+      tab,
+    })
+  }, [openAgentSidePanel, sessionId])
 
   const handleAttachFolder = React.useCallback(async () => {
     try {
@@ -166,10 +242,11 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
         map.set(sessionId, updated)
         return map
       })
+      openByLocalFileAdded('session')
     } catch (error) {
       console.error('[SidePanel] 附加文件夹失败:', error)
     }
-  }, [sessionId, setAttachedDirsMap])
+  }, [sessionId, setAttachedDirsMap, openByLocalFileAdded])
 
   const handleDetachDirectory = React.useCallback(async (dirPath: string) => {
     try {
@@ -207,10 +284,11 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
         map.set(currentWorkspaceId, updated)
         return map
       })
+      openByLocalFileAdded('workspace')
     } catch (error) {
       console.error('[SidePanel] 附加工作区文件夹失败:', error)
     }
-  }, [workspaceSlug, currentWorkspaceId, setWsAttachedDirsMap])
+  }, [workspaceSlug, currentWorkspaceId, setWsAttachedDirsMap, openByLocalFileAdded])
 
   const handleDetachWorkspaceDirectory = React.useCallback(async (dirPath: string) => {
     if (!workspaceSlug || !currentWorkspaceId) return
@@ -233,25 +311,24 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
     }
   }, [workspaceSlug, currentWorkspaceId, setWsAttachedDirsMap])
 
-  // 文件上传完成后递增版本号，触发 FileBrowser 刷新
-  const handleFilesUploaded = React.useCallback(() => {
+  const bumpFilesVersion = React.useCallback(() => {
     setFilesVersion((prev) => prev + 1)
-    setNewFilesVersion((prev) => prev + 1)
-  }, [setFilesVersion, setNewFilesVersion])
+  }, [setFilesVersion])
 
-  // 手动刷新文件列表
+  const handleSessionFilesUploaded = React.useCallback(() => {
+    bumpFilesVersion()
+    openByLocalFileAdded('session')
+  }, [bumpFilesVersion, openByLocalFileAdded])
+
+  const handleWorkspaceFilesUploaded = React.useCallback(() => {
+    bumpFilesVersion()
+    openByLocalFileAdded('workspace')
+  }, [bumpFilesVersion, openByLocalFileAdded])
+
   const handleRefresh = React.useCallback(() => {
     setFilesVersion((prev) => prev + 1)
   }, [setFilesVersion])
 
-  // 面包屑：显示根路径最后两段
-  const breadcrumb = React.useMemo(() => {
-    if (!sessionPath) return ''
-    const parts = sessionPath.split('/').filter(Boolean)
-    return parts.length > 2 ? `.../${parts.slice(-2).join('/')}` : sessionPath
-  }, [sessionPath])
-
-  // 工作区文件目录路径
   const [workspaceFilesPath, setWorkspaceFilesPath] = React.useState<string | null>(null)
   React.useEffect(() => {
     if (!workspaceSlug) {
@@ -261,109 +338,110 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
     window.electronAPI.getWorkspaceFilesPath(workspaceSlug).then(setWorkspaceFilesPath).catch(() => setWorkspaceFilesPath(null))
   }, [workspaceSlug])
 
-  // 自动打开：仅“新增文件/目录”时触发，且尊重手动收起锁
-  const prevNewFilesVersionBySessionRef = React.useRef<Map<string, number>>(new Map())
-  React.useEffect(() => {
-    const prevVersion = prevNewFilesVersionBySessionRef.current.get(sessionId) ?? newFilesVersion
-    const hasNewFileEvent = newFilesVersion > prevVersion
-    prevNewFilesVersionBySessionRef.current.set(sessionId, newFilesVersion)
-
-    if (!hasNewFileEvent || !sessionPath) return
-    if (isOpen) return
-    if (isManualCollapseLocked) return
-
-    setPanelOpen(true, 'auto')
-  }, [sessionId, newFilesVersion, sessionPath, isOpen, isManualCollapseLocked, setPanelOpen])
-
   return (
     <div
+      ref={rootRef}
       className={cn(
-        'relative h-full flex-shrink-0 overflow-hidden titlebar-drag-region bg-content-area/95 backdrop-blur-xl rounded-2xl shadow-xl',
-        animateRef.current && 'transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[width]',
-        isOpen ? 'w-[320px]' : 'w-0',
+        'relative h-full flex-shrink-0 overflow-hidden titlebar-drag-region rounded-2xl bg-content-area/95',
+        isOpen ? 'border border-border/60 shadow-sm' : 'border border-transparent shadow-none',
+        isResizing ? 'transition-none' : 'transition-[width] duration-200 ease-out',
       )}
+      style={{ width: isOpen ? panelWidth : 0 }}
     >
-      {/* 面板内容 */}
+      {isOpen && (
+        <div
+          className="absolute left-0 top-0 z-20 h-full w-1.5 cursor-col-resize titlebar-no-drag"
+          onPointerDown={handleResizePointerDown}
+          aria-hidden
+        />
+      )}
       <div
+        ref={contentRef}
         className={cn(
-          'w-[320px] h-full flex flex-col titlebar-no-drag pt-3',
-          animateRef.current && 'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[opacity,transform]',
-          isOpen
-            ? 'opacity-100 translate-x-0 blur-0 delay-75'
-            : 'opacity-0 translate-x-4 blur-[1px] delay-0 pointer-events-none',
+          'h-full flex flex-col titlebar-no-drag pt-3 px-2 pb-2',
+          !isOpen && 'pointer-events-none',
         )}
+        style={{ width: panelWidth }}
       >
-          {/* 文件浏览内容 */}
-          {sessionPath && workspaceSlug ? (
-            <div className="flex-1 min-h-0 flex flex-col">
-                  {/* ===== 会话文件区 ===== */}
-                  <div className="flex items-center gap-1 px-3 h-[32px] flex-shrink-0">
-                    <FolderOpen className="size-3 text-muted-foreground" />
-                    <span className="text-[11px] font-medium text-muted-foreground">会话文件</span>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Info className="size-3 text-muted-foreground/50 cursor-help" />
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom" className="max-w-[200px]">
-                        <p>当前会话的专属文件，仅本次对话的 Agent 可以访问</p>
-                      </TooltipContent>
-                    </Tooltip>
-                    <span className="text-[10px] text-muted-foreground/75 truncate flex-1" title={sessionPath}>
-                      {breadcrumb}
-                    </span>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="h-5 w-5 flex-shrink-0"
-                          onClick={() => window.electronAPI.openFile(sessionPath).catch(console.error)}
-                        >
-                          <ExternalLink className="size-2.5" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom">
-                        <p>在 Finder 中打开</p>
-                      </TooltipContent>
-                    </Tooltip>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="h-5 w-5 flex-shrink-0"
-                          onClick={handleRefresh}
-                        >
-                          <RefreshCw className="size-2.5" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom">
-                        <p>刷新文件列表</p>
-                      </TooltipContent>
-                    </Tooltip>
-                    {/* 关闭面板按钮 */}
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="h-5 w-5 flex-shrink-0"
-                          onClick={handleToggleOpen}
-                        >
-                          <X className="size-2.5" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom">
-                        <p>关闭侧面板</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </div>
-                  {/* 会话文件内容区（独立滚动） */}
-                  <div className="flex-1 min-h-0 overflow-y-auto">
-                    {/* 附加目录列表（可展开目录树） */}
+        {sessionPath && workspaceSlug ? (
+          <Tabs
+            value={activeTab}
+            onValueChange={(value) => setActiveTab(value as AgentSidePanelTab)}
+            className="flex-1 min-h-0 flex flex-col"
+          >
+            <div className="h-8 flex items-center gap-1 px-1 shrink-0">
+              <TabsList className="h-7 rounded-md bg-muted/40 p-0.5">
+                <TabsTrigger value="session" className="h-6 px-2.5 text-[11px]">会话文件</TabsTrigger>
+                <TabsTrigger value="workspace" className="h-6 px-2.5 text-[11px]">工作区文件</TabsTrigger>
+              </TabsList>
+              <div className="flex-1" />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={handleRefresh}
+                  >
+                    <RefreshCw className="size-3" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <p>刷新文件列表</p>
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={handleClosePanel}
+                  >
+                    <X className="size-3" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <p>关闭侧面板</p>
+                </TooltipContent>
+              </Tooltip>
+            </div>
+
+            <div className="mt-2 flex-1 min-h-0 overflow-hidden rounded-xl border border-border/60 bg-background/35">
+              <div className="h-full overflow-y-auto px-1 pb-1">
+                {activeTab === 'session' ? (
+                  <>
+                    <div className="flex items-center gap-1 px-2 pt-2 h-8">
+                      <FolderOpen className="size-3 text-muted-foreground" />
+                      <span className="text-[11px] font-medium text-muted-foreground">会话文件</span>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="size-3 text-muted-foreground/60 cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" className="max-w-[200px]">
+                          <p>当前会话的专属文件，仅本次对话的 Agent 可以访问</p>
+                        </TooltipContent>
+                      </Tooltip>
+                      <div className="flex-1" />
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-5 w-5 flex-shrink-0"
+                            onClick={() => window.electronAPI.openFile(sessionPath).catch(console.error)}
+                          >
+                            <ExternalLink className="size-2.5" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">
+                          <p>在 Finder 中打开</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
                     {attachedDirs.length > 0 && (
                       <AttachedDirsSection
                         attachedDirs={attachedDirs}
@@ -371,29 +449,23 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
                         refreshVersion={filesVersion}
                       />
                     )}
-                    {/* 会话文件浏览器 */}
                     <FileBrowser rootPath={sessionPath} hideToolbar embedded />
-                    {/* 会话文件拖拽上传区域 */}
                     <FileDropZone
                       workspaceSlug={workspaceSlug}
                       sessionId={sessionId}
                       target="session"
-                      onFilesUploaded={handleFilesUploaded}
+                      onFilesUploaded={handleSessionFilesUploaded}
                       onAttachFolder={handleAttachFolder}
                     />
-                  </div>
-
-                  {/* ===== 分隔线 ===== */}
-                  <div className="mx-3 my-3 border-t border-muted-foreground/20" />
-
-                  {/* ===== 工作区文件区 ===== */}
-                  <div className="flex-1 min-h-0 flex flex-col mx-2 mb-2">
-                    <div className="flex items-center gap-1 px-2 h-[32px] flex-shrink-0">
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-1 px-2 pt-2 h-8">
                       <FolderHeart className="size-3 text-muted-foreground" />
                       <span className="text-[11px] font-medium text-muted-foreground">工作区文件</span>
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <Info className="size-3 text-muted-foreground/50 cursor-help" />
+                          <Info className="size-3 text-muted-foreground/60 cursor-help" />
                         </TooltipTrigger>
                         <TooltipContent side="bottom" className="max-w-[220px]">
                           <p>工作区内所有会话可访问的文件和文件夹，每个新对话都可以自动读取</p>
@@ -419,56 +491,52 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
                         </Tooltip>
                       )}
                     </div>
-                    {/* 工作区文件内容区（独立滚动） */}
-                    <div className="flex-1 min-h-0 overflow-y-auto pb-1">
-                      {/* 工作区级附加目录 */}
-                      {wsAttachedDirs.length > 0 && (
-                        <AttachedDirsSection
-                          attachedDirs={wsAttachedDirs}
-                          onDetach={handleDetachWorkspaceDirectory}
-                          refreshVersion={filesVersion}
-                        />
-                      )}
-                      {/* 工作区文件浏览器 */}
-                      {workspaceFilesPath && (
-                        <FileBrowser rootPath={workspaceFilesPath} hideToolbar embedded />
-                      )}
-                      {/* 工作区文件拖拽上传区域 */}
-                      <FileDropZone
-                        workspaceSlug={workspaceSlug}
-                        target="workspace"
-                        onFilesUploaded={handleFilesUploaded}
-                        onAttachFolder={handleAttachWorkspaceFolder}
+                    {wsAttachedDirs.length > 0 && (
+                      <AttachedDirsSection
+                        attachedDirs={wsAttachedDirs}
+                        onDetach={handleDetachWorkspaceDirectory}
+                        refreshVersion={filesVersion}
                       />
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex-1 flex flex-col">
-                  {/* 顶部关闭按钮 */}
-                  <div className="flex items-center justify-end px-3 h-[32px] flex-shrink-0">
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="h-5 w-5 flex-shrink-0"
-                          onClick={handleToggleOpen}
-                        >
-                          <X className="size-2.5" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom">
-                        <p>关闭侧面板</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </div>
-                  <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
-                    请选择工作区
-                  </div>
-                </div>
-              )}
+                    )}
+                    {workspaceFilesPath && (
+                      <FileBrowser rootPath={workspaceFilesPath} hideToolbar embedded />
+                    )}
+                    <FileDropZone
+                      workspaceSlug={workspaceSlug}
+                      target="workspace"
+                      onFilesUploaded={handleWorkspaceFilesUploaded}
+                      onAttachFolder={handleAttachWorkspaceFolder}
+                    />
+                  </>
+                )}
+              </div>
+            </div>
+          </Tabs>
+        ) : (
+          <div className="flex-1 flex flex-col">
+            <div className="flex items-center justify-end h-8 px-1">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={handleClosePanel}
+                  >
+                    <X className="size-3" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <p>关闭侧面板</p>
+                </TooltipContent>
+              </Tooltip>
+            </div>
+            <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
+              请选择工作区
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -537,6 +605,7 @@ function AttachedDirTree({ dirPath, onDetach, selectedPaths, onSelect, refreshVe
   const [expanded, setExpanded] = React.useState(false)
   const [children, setChildren] = React.useState<FileEntry[]>([])
   const [loaded, setLoaded] = React.useState(false)
+  const isSelected = selectedPaths.has(dirPath)
 
   const dirName = dirPath.split('/').filter(Boolean).pop() || dirPath
 
@@ -562,17 +631,31 @@ function AttachedDirTree({ dirPath, onDetach, selectedPaths, onSelect, refreshVe
     setExpanded(!expanded)
   }
 
+  const handleRowClick = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    onSelect(dirPath, e.ctrlKey || e.metaKey)
+  }
+
+  const handleChevronClick = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    void toggleExpand()
+  }
+
   return (
     <div>
       <div
-        className="flex items-center gap-1 py-1 px-2 cursor-pointer hover:bg-accent/50 group"
-        onClick={toggleExpand}
+        className={cn(
+          'flex items-center gap-1 py-1 px-2 cursor-pointer group',
+          isSelected ? 'bg-accent' : 'hover:bg-accent/50',
+        )}
+        onClick={handleRowClick}
       >
         <ChevronRight
           className={cn(
-            'size-3.5 text-muted-foreground flex-shrink-0 transition-transform duration-150',
+            'size-3.5 text-muted-foreground flex-shrink-0 transition-transform duration-150 cursor-pointer hover:text-foreground/85',
             expanded && 'rotate-90',
           )}
+          onClick={handleChevronClick}
         />
         <FileTypeIcon name={dirName} isDirectory isOpen={expanded} />
         <span className="text-xs truncate flex-1" title={dirPath}>
@@ -648,10 +731,13 @@ function AttachedDirItem({ entry, depth, selectedPaths, onSelect, refreshVersion
   }
 
   const handleClick = (e: React.MouseEvent): void => {
+    e.stopPropagation()
     onSelect(currentPath, e.ctrlKey || e.metaKey)
-    if (entry.isDirectory) {
-      toggleDir()
-    }
+  }
+
+  const handleChevronClick = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    void toggleDir()
   }
 
   const handleDoubleClick = (): void => {
@@ -726,9 +812,10 @@ function AttachedDirItem({ entry, depth, selectedPaths, onSelect, refreshVersion
         {entry.isDirectory ? (
           <ChevronRight
             className={cn(
-              'size-3.5 text-muted-foreground flex-shrink-0 transition-transform duration-150',
+              'size-3.5 text-muted-foreground flex-shrink-0 transition-transform duration-150 cursor-pointer hover:text-foreground/85',
               expanded && 'rotate-90',
             )}
+            onClick={handleChevronClick}
           />
         ) : (
           <span className="w-3.5 flex-shrink-0" />
@@ -747,7 +834,7 @@ function AttachedDirItem({ entry, depth, selectedPaths, onSelect, refreshVersion
               if (e.key === 'Escape') cancelRename()
               e.stopPropagation()
             }}
-            onBlur={confirmRename}
+            onBlur={cancelRename}
             onClick={(e) => e.stopPropagation()}
           />
         ) : (

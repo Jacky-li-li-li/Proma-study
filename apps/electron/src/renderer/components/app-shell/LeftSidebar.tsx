@@ -41,6 +41,8 @@ import {
   workspaceCapabilitiesVersionAtom,
   agentSidePanelOpenMapAtom,
   agentSidePanelManualCollapseLockMapAtom,
+  agentSidePanelActiveTabMapAtom,
+  agentSidePanelWidthMapAtom,
 } from '@/atoms/agent-atoms'
 import {
   tabsAtom,
@@ -228,6 +230,8 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
   const setConvPromptId = useSetAtom(conversationPromptIdAtom)
   const setAgentSidePanelOpen = useSetAtom(agentSidePanelOpenMapAtom)
   const setAgentSidePanelManualCollapseLock = useSetAtom(agentSidePanelManualCollapseLockMapAtom)
+  const setAgentSidePanelActiveTab = useSetAtom(agentSidePanelActiveTabMapAtom)
+  const setAgentSidePanelWidth = useSetAtom(agentSidePanelWidthMapAtom)
 
   /** 清理 per-conversation/session Map atoms 条目 */
   const cleanupMapAtoms = React.useCallback((id: string) => {
@@ -244,9 +248,11 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
     setConvPromptId(deleteKey)
     setAgentSidePanelOpen(deleteKey)
     setAgentSidePanelManualCollapseLock(deleteKey)
+    setAgentSidePanelActiveTab(deleteKey)
+    setAgentSidePanelWidth(deleteKey)
     setSessionChannelMap(deleteKey)
     setSessionModelMap(deleteKey)
-  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setAgentSidePanelOpen, setAgentSidePanelManualCollapseLock, setSessionChannelMap, setSessionModelMap])
+  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setAgentSidePanelOpen, setAgentSidePanelManualCollapseLock, setAgentSidePanelActiveTab, setAgentSidePanelWidth, setSessionChannelMap, setSessionModelMap])
 
   const currentWorkspaceSlug = React.useMemo(() => {
     if (!currentWorkspaceId) return null

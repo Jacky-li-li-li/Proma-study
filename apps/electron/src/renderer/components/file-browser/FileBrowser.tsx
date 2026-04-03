@@ -401,13 +401,16 @@ function FileTreeItem({
     setExpanded(!expanded)
   }
 
-  /** 点击行为：选中 + 文件夹展开/收起 */
+  /** 点击行为：仅选中 */
   const handleClick = (e: React.MouseEvent): void => {
     e.stopPropagation()
     onSelect(entry, e)
-    if (entry.isDirectory && !e.metaKey && !e.ctrlKey) {
-      toggleDir()
-    }
+  }
+
+  /** 仅点击箭头时展开/收起 */
+  const handleChevronClick = (e: React.MouseEvent): void => {
+    e.stopPropagation()
+    void toggleDir()
   }
 
   /** 双击预览文件 */
@@ -479,14 +482,10 @@ function FileTreeItem({
     }
   }
 
-  /** 重命名失焦 */
+  /** 重命名失焦：按防误触策略取消，不自动保存 */
   const handleBlur = (): void => {
-    if (renameError) {
-      onCancelRename()
-      setRenameError(null)
-    } else {
-      void saveRename()
-    }
+    onCancelRename()
+    setRenameError(null)
   }
 
   const paddingLeft = 8 + depth * 16
@@ -507,9 +506,10 @@ function FileTreeItem({
         {entry.isDirectory ? (
           <ChevronRight
             className={cn(
-              'size-3.5 text-muted-foreground flex-shrink-0 transition-transform duration-150',
+              'size-3.5 text-muted-foreground flex-shrink-0 transition-transform duration-150 cursor-pointer hover:text-foreground/85',
               expanded && 'rotate-90',
             )}
+            onClick={handleChevronClick}
           />
         ) : (
           <span className="w-3.5 flex-shrink-0" />

@@ -59,6 +59,7 @@ import {
   agentPermissionModeMapAtom,
   agentDefaultPermissionModeAtom,
   agentSessionPathMapAtom,
+  openAgentSidePanelAtom,
   allPendingAskUserRequestsAtom,
   allPendingExitPlanRequestsAtom,
   allPendingPermissionRequestsAtom,
@@ -278,6 +279,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const [tabs, setTabs] = useAtom(tabsAtom)
   const [layout, setLayout] = useAtom(splitLayoutAtom)
   const setAttachedDirsMap = useSetAtom(agentAttachedDirectoriesMapAtom)
+  const openAgentSidePanel = useSetAtom(openAgentSidePanelAtom)
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
   const attachedDirs = attachedDirsMap.get(sessionId) ?? []
   const wsAttachedDirsMap = useAtomValue(workspaceAttachedDirectoriesMapAtom)
@@ -640,13 +642,18 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         map.set(sessionId, updated)
         return map
       })
+      openAgentSidePanel({
+        sessionId,
+        reason: 'local_file_added',
+        tab: 'session',
+      })
 
       toast.success(`已附加目录: ${result.name}`)
     } catch (error) {
       console.error('[AgentView] 附加文件夹失败:', error)
       toast.error('附加文件夹失败')
     }
-  }, [sessionId, setAttachedDirsMap])
+  }, [sessionId, setAttachedDirsMap, openAgentSidePanel])
 
   /** 移除待发送文件 */
   const handleRemoveFile = React.useCallback((id: string): void => {

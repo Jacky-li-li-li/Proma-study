@@ -164,8 +164,8 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
           <div
             className={
               isCurrentSidePanelOpen
-                ? 'relative z-[60] transition-[padding] duration-300 ease-in-out p-2 pl-0'
-                : 'relative z-[60] transition-[padding] duration-300 ease-in-out p-0'
+                ? 'relative z-[60] p-2 pl-0'
+                : 'relative z-[60] p-0'
             }
           >
             <RightSidePanel sessionId={targetAgentSessionId} />

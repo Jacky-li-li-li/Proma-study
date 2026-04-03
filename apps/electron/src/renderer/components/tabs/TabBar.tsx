@@ -35,6 +35,9 @@ import {
   agentSessionsAtom,
   agentSidePanelOpenMapAtom,
   agentSidePanelManualCollapseLockMapAtom,
+  agentSidePanelActiveTabMapAtom,
+  agentSidePanelWidthMapAtom,
+  openAgentSidePanelAtom,
   currentAgentSessionIdAtom,
   currentAgentWorkspaceIdAtom,
 } from '@/atoms/agent-atoms'
@@ -56,7 +59,6 @@ export function TabBar(): React.ReactElement {
   const currentAgentSessionId = useAtomValue(currentAgentSessionIdAtom)
   const rootRef = React.useRef<HTMLDivElement>(null)
   const scrollRef = React.useRef<HTMLDivElement>(null)
-  const skipNextSidePanelClickRef = React.useRef(false)
 
   // per-conversation/session Map atoms（用于关闭标签时清理）
   const setConvModels = useSetAtom(conversationModelsAtom)
@@ -71,6 +73,9 @@ export function TabBar(): React.ReactElement {
   const setConvPromptId = useSetAtom(conversationPromptIdAtom)
   const setAgentSidePanelOpen = useSetAtom(agentSidePanelOpenMapAtom)
   const setAgentSidePanelManualCollapseLock = useSetAtom(agentSidePanelManualCollapseLockMapAtom)
+  const setAgentSidePanelActiveTab = useSetAtom(agentSidePanelActiveTabMapAtom)
+  const setAgentSidePanelWidth = useSetAtom(agentSidePanelWidthMapAtom)
+  const openAgentSidePanel = useSetAtom(openAgentSidePanelAtom)
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
   const activeAgentSessionId = activeTab?.type === 'agent'
     ? activeTab.sessionId
@@ -109,7 +114,9 @@ export function TabBar(): React.ReactElement {
     // Agent per-session atoms
     setAgentSidePanelOpen(deleteKey)
     setAgentSidePanelManualCollapseLock(deleteKey)
-  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setAgentSidePanelOpen, setAgentSidePanelManualCollapseLock])
+    setAgentSidePanelActiveTab(deleteKey)
+    setAgentSidePanelWidth(deleteKey)
+  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setAgentSidePanelOpen, setAgentSidePanelManualCollapseLock, setAgentSidePanelActiveTab, setAgentSidePanelWidth])
 
   // 拖拽状态
   const dragState = React.useRef<{
@@ -201,41 +208,28 @@ export function TabBar(): React.ReactElement {
     if (!targetAgentSessionId) return
     const nextOpen = !isAgentSidePanelOpen
 
-    setAgentSidePanelOpen((prev) => {
-      const current = prev.get(targetAgentSessionId) ?? false
-      if (current === nextOpen) return prev
-      const map = new Map(prev)
-      map.set(targetAgentSessionId, nextOpen)
-      return map
-    })
-
-    setAgentSidePanelManualCollapseLock((prev) => {
-      const map = new Map(prev)
-      if (nextOpen) {
-        map.delete(targetAgentSessionId)
-      } else {
-        map.set(targetAgentSessionId, true)
-      }
-      return map
-    })
-  }, [targetAgentSessionId, isAgentSidePanelOpen, setAgentSidePanelOpen, setAgentSidePanelManualCollapseLock])
-
-  // 折叠左侧栏时主区域会位移动画，click(up) 可能丢失；用 pointerdown 立即触发
-  const handleSidePanelTogglePointerDown = React.useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
-    if (e.pointerType === 'mouse' && e.button !== 0) return
-    e.preventDefault()
-    e.stopPropagation()
-    skipNextSidePanelClickRef.current = true
-    handleToggleAgentSidePanel()
-  }, [handleToggleAgentSidePanel])
-
-  const handleSidePanelToggleClick = React.useCallback(() => {
-    if (skipNextSidePanelClickRef.current) {
-      skipNextSidePanelClickRef.current = false
+    if (nextOpen) {
+      openAgentSidePanel({
+        sessionId: targetAgentSessionId,
+        reason: 'manual',
+      })
       return
     }
-    handleToggleAgentSidePanel()
-  }, [handleToggleAgentSidePanel])
+
+    setAgentSidePanelOpen((prev) => {
+      const current = prev.get(targetAgentSessionId) ?? false
+      if (!current) return prev
+      const map = new Map(prev)
+      map.set(targetAgentSessionId, false)
+      return map
+    })
+    setAgentSidePanelManualCollapseLock((prev) => {
+      if (prev.get(targetAgentSessionId) === true) return prev
+      const map = new Map(prev)
+      map.set(targetAgentSessionId, true)
+      return map
+    })
+  }, [targetAgentSessionId, isAgentSidePanelOpen, setAgentSidePanelOpen, setAgentSidePanelManualCollapseLock, openAgentSidePanel])
 
   const sidePanelToggleButton = canToggleAgentSidePanel && !isAgentSidePanelOpen && (
     <Tooltip>
@@ -246,8 +240,7 @@ export function TabBar(): React.ReactElement {
           size="icon"
           className="size-[34px] shrink-0 rounded-none text-muted-foreground hover:text-foreground titlebar-no-drag"
           aria-label="打开侧面板"
-          onPointerDown={handleSidePanelTogglePointerDown}
-          onClick={handleSidePanelToggleClick}
+          onClick={handleToggleAgentSidePanel}
         >
           <PanelRightOpen className="size-4" />
         </Button>

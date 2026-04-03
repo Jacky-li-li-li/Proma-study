@@ -258,6 +258,59 @@ export const workspaceNewFilesVersionAtom = atom(0)
 export const agentSidePanelOpenMapAtom = atom<Map<string, boolean>>(new Map())
 /** 用户手动折叠锁（per-session），防止自动逻辑在短时间内反向展开 */
 export const agentSidePanelManualCollapseLockMapAtom = atom<Map<string, boolean>>(new Map())
+/** 侧面板当前标签页（per-session） */
+export type AgentSidePanelTab = 'session' | 'workspace'
+export const agentSidePanelActiveTabMapAtom = atom<Map<string, AgentSidePanelTab>>(new Map())
+/** 侧面板宽度（per-session） */
+export const agentSidePanelWidthMapAtom = atom<Map<string, number>>(new Map())
+/** 统一开栏原因 */
+export type AgentSidePanelOpenReason = 'manual' | 'local_file_added'
+
+/**
+ * 统一开栏入口（manual / local_file_added）
+ *
+ * 自动开栏逻辑必须经由该 atom，避免多处直接改 openMap 造成行为不一致。
+ */
+export const openAgentSidePanelAtom = atom(
+  null,
+  (
+    _get,
+    set,
+    payload: {
+      sessionId: string
+      reason: AgentSidePanelOpenReason
+      tab?: AgentSidePanelTab
+    }
+  ) => {
+    const { sessionId, reason, tab } = payload
+
+    set(agentSidePanelOpenMapAtom, (prev) => {
+      if (prev.get(sessionId) === true) return prev
+      const map = new Map(prev)
+      map.set(sessionId, true)
+      return map
+    })
+
+    if (tab) {
+      set(agentSidePanelActiveTabMapAtom, (prev) => {
+        const current = prev.get(sessionId)
+        if (current === tab) return prev
+        const map = new Map(prev)
+        map.set(sessionId, tab)
+        return map
+      })
+    }
+
+    if (reason === 'manual' || reason === 'local_file_added') {
+      set(agentSidePanelManualCollapseLockMapAtom, (prev) => {
+        if (!prev.has(sessionId)) return prev
+        const map = new Map(prev)
+        map.delete(sessionId)
+        return map
+      })
+    }
+  }
+)
 
 /** 当前会话的工作路径 Map — sessionId → path */
 export const agentSessionPathMapAtom = atom<Map<string, string>>(new Map())
