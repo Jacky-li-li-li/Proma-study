@@ -217,6 +217,7 @@ import { getDingTalkConfig, saveDingTalkConfig, getDecryptedClientSecret, getDin
 import { dingtalkBridgeManager } from './lib/dingtalk-bridge-manager'
 import { getWeChatConfig } from './lib/wechat-config'
 import { wechatBridge } from './lib/wechat-bridge'
+import { resolveSearchRoots } from './lib/workspace-search'
 
 function isPathInsideRoot(targetPath: string, rootPath: string): boolean {
   const safeTarget = resolve(targetPath)
@@ -1775,11 +1776,15 @@ export function registerIpcHandlers(): void {
       const { relative } = await import('node:path')
 
       const workspaceRoot = getAgentWorkspacesDir()
-      const safeRoot = resolve(rootPath)
       const attachedRoots = collectAttachedDirectoryRoots()
-      const rootAllowed = isPathInsideRoot(safeRoot, workspaceRoot) || attachedRoots.some((root) => isPathInsideRoot(safeRoot, root))
-      if (!rootAllowed) {
-        throw new Error('搜索路径不在允许范围内')
+      const { scanRoots, skippedAdditionalPaths } = resolveSearchRoots({
+        rootPath,
+        workspaceRoot,
+        attachedRoots,
+        additionalPaths,
+      })
+      if (skippedAdditionalPaths.length > 0) {
+        console.warn('[IPC] SEARCH_WORKSPACE_FILES 跳过非法附加路径:', skippedAdditionalPaths)
       }
       const ignoreDirs = new Set(['node_modules', '.git', 'dist', '.next', '__pycache__', '.venv', 'build', '.cache'])
 
@@ -1812,14 +1817,8 @@ export function registerIpcHandlers(): void {
         }
       }
 
-      scan(safeRoot, 0, safeRoot)
-
-      // 扫描附加目录（外部路径）
-      if (additionalPaths && additionalPaths.length > 0) {
-        for (const addPath of additionalPaths) {
-          const addRoot = assertPathInsideAttachedDirectories(addPath, '附加搜索路径不在已附加目录范围内')
-          scan(addRoot, 0, addRoot)
-        }
+      for (const scanRoot of scanRoots) {
+        scan(scanRoot, 0, scanRoot)
       }
 
       // 搜索匹配

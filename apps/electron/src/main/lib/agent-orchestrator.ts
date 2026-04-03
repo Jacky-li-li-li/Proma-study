@@ -17,7 +17,7 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, dirname, resolve, relative, isAbsolute } from 'node:path'
-import { existsSync, mkdirSync, symlinkSync, readFileSync, writeFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, symlinkSync, readFileSync, writeFileSync, statSync, chmodSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { app } from 'electron'
@@ -324,6 +324,81 @@ function ensureRipgrepAvailable(cliPath: string): void {
     console.warn('[Agent 编排] ripgrep symlink 创建失败:', error)
   }
 }
+
+interface RipgrepSelfHealResult {
+  status: 'ready' | 'fixed' | 'missing' | 'failed'
+  binaryPath: string
+  manualFixCommand?: string
+  error?: unknown
+}
+
+function getRipgrepBinaryPath(cliPath: string): string {
+  const sdkDir = dirname(cliPath)
+  const platformArch = `${process.arch}-${process.platform}`
+  const binaryName = process.platform === 'win32' ? 'rg.exe' : 'rg'
+  return join(sdkDir, 'vendor', 'ripgrep', platformArch, binaryName)
+}
+
+/**
+ * 自愈 SDK vendor ripgrep 执行权限（仅 Unix 平台需要）。
+ * - 无执行位时自动 chmod +x
+ * - 无法修复时返回手工修复命令
+ */
+function ensureRipgrepExecutable(cliPath: string): RipgrepSelfHealResult {
+  const rgPath = getRipgrepBinaryPath(cliPath)
+
+  if (!existsSync(rgPath)) {
+    return {
+      status: 'missing',
+      binaryPath: rgPath,
+    }
+  }
+
+  // Windows 不依赖 POSIX 执行位，存在即可视为可用
+  if (process.platform === 'win32') {
+    return {
+      status: 'ready',
+      binaryPath: rgPath,
+    }
+  }
+
+  const hasExecutableBit = (mode: number): boolean => (mode & 0o111) !== 0
+
+  try {
+    const currentMode = statSync(rgPath).mode
+    if (hasExecutableBit(currentMode)) {
+      return {
+        status: 'ready',
+        binaryPath: rgPath,
+      }
+    }
+
+    chmodSync(rgPath, currentMode | 0o111)
+    const updatedMode = statSync(rgPath).mode
+    if (hasExecutableBit(updatedMode)) {
+      return {
+        status: 'fixed',
+        binaryPath: rgPath,
+      }
+    }
+
+    return {
+      status: 'failed',
+      binaryPath: rgPath,
+      manualFixCommand: `chmod +x "${rgPath}"`,
+      error: new Error('chmod 执行后仍缺少执行权限'),
+    }
+  } catch (error) {
+    return {
+      status: 'failed',
+      binaryPath: rgPath,
+      manualFixCommand: `chmod +x "${rgPath}"`,
+      error,
+    }
+  }
+}
+
+const ripgrepPermissionFailureNotified = new Set<string>()
 
 /** 最大回填消息条数 */
 const MAX_CONTEXT_MESSAGES = 20
@@ -976,6 +1051,22 @@ export class AgentOrchestrator {
       }
 
       ensureRipgrepAvailable(cliPath)
+      const ripgrepSelfHeal = ensureRipgrepExecutable(cliPath)
+      if (ripgrepSelfHeal.status === 'fixed') {
+        console.log(`[Agent 编排] ripgrep 执行权限自动修复成功: ${ripgrepSelfHeal.binaryPath}`)
+      } else if (ripgrepSelfHeal.status === 'ready') {
+        // 已可执行，无需提示
+      } else if (ripgrepSelfHeal.status === 'missing') {
+        console.warn(`[Agent 编排] ripgrep 可执行文件不存在: ${ripgrepSelfHeal.binaryPath}`)
+      } else {
+        const manualFix = ripgrepSelfHeal.manualFixCommand ?? `chmod +x "${ripgrepSelfHeal.binaryPath}"`
+        console.error('[Agent 编排] ripgrep 执行权限自动修复失败:', ripgrepSelfHeal.error ?? ripgrepSelfHeal.binaryPath)
+        const notifiedKey = `${ripgrepSelfHeal.binaryPath}:${manualFix}`
+        if (!ripgrepPermissionFailureNotified.has(notifiedKey)) {
+          ripgrepPermissionFailureNotified.add(notifiedKey)
+          callbacks.onError(`SDK ripgrep 权限自动修复失败，请手动执行：${manualFix}`)
+        }
+      }
 
       console.log(
         `[Agent 编排] 启动 SDK — CLI: ${cliPath}, 运行时: ${agentExec.type} (${agentExec.path}), 模型: ${modelId || DEFAULT_MODEL_ID}, resume: ${existingSdkSessionId ?? '无'}`,

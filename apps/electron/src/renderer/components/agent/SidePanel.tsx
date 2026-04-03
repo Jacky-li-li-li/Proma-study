@@ -6,6 +6,7 @@
 
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
+import { toast } from 'sonner'
 import { X, FolderOpen, ExternalLink, RefreshCw, ChevronRight, MoreHorizontal, FolderSearch, Pencil, FolderInput, Info, FolderHeart } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -45,6 +46,10 @@ const SIDE_PANEL_TRANSITION_MS = 220
 
 function clampSidePanelWidth(width: number): number {
   return Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(SIDE_PANEL_MAX_WIDTH, width))
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.ReactElement {
@@ -126,7 +131,10 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
           return map
         })
       })
-      .catch(console.error)
+      .catch((error) => {
+        console.error('[SidePanel] 加载工作区附加目录失败:', error)
+        toast.error('加载工作区附加目录失败', { description: getErrorMessage(error) })
+      })
   }, [workspaceSlug, currentWorkspaceId, setWsAttachedDirsMap])
 
   const setActiveTab = React.useCallback((nextTab: AgentSidePanelTab) => {
@@ -245,6 +253,7 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
       openByLocalFileAdded('session')
     } catch (error) {
       console.error('[SidePanel] 附加文件夹失败:', error)
+      toast.error('附加文件夹失败', { description: getErrorMessage(error) })
     }
   }, [sessionId, setAttachedDirsMap, openByLocalFileAdded])
 
@@ -265,6 +274,7 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
       })
     } catch (error) {
       console.error('[SidePanel] 移除附加目录失败:', error)
+      toast.error('移除附加目录失败', { description: getErrorMessage(error) })
     }
   }, [sessionId, setAttachedDirsMap])
 
@@ -287,6 +297,7 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
       openByLocalFileAdded('workspace')
     } catch (error) {
       console.error('[SidePanel] 附加工作区文件夹失败:', error)
+      toast.error('附加工作区文件夹失败', { description: getErrorMessage(error) })
     }
   }, [workspaceSlug, currentWorkspaceId, setWsAttachedDirsMap, openByLocalFileAdded])
 
@@ -308,6 +319,7 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
       })
     } catch (error) {
       console.error('[SidePanel] 移除工作区附加目录失败:', error)
+      toast.error('移除工作区附加目录失败', { description: getErrorMessage(error) })
     }
   }, [workspaceSlug, currentWorkspaceId, setWsAttachedDirsMap])
 
@@ -499,7 +511,13 @@ export function SidePanel({ sessionId, sessionPath }: SidePanelProps): React.Rea
                       />
                     )}
                     {workspaceFilesPath && (
-                      <FileBrowser rootPath={workspaceFilesPath} hideToolbar embedded />
+                      <FileBrowser
+                        rootPath={workspaceFilesPath}
+                        hideToolbar
+                        embedded
+                        showEmptyState={wsAttachedDirs.length === 0}
+                        emptyStateText="工作区文件目录为空"
+                      />
                     )}
                     <FileDropZone
                       workspaceSlug={workspaceSlug}
@@ -575,6 +593,7 @@ function AttachedDirsSection({ attachedDirs, onDetach, refreshVersion }: Attache
   return (
     <div className="pt-2.5 pb-1 flex-shrink-0">
       <div className="text-[11px] font-medium text-muted-foreground mb-1 px-3">附加目录（Agent 可以读取并操作此文件夹）</div>
+      <div className="text-[10px] text-muted-foreground/75 mb-1 px-3">点击左侧箭头展开目录</div>
       {attachedDirs.map((dir) => (
         <AttachedDirTree
           key={dir}
@@ -614,7 +633,10 @@ function AttachedDirTree({ dirPath, onDetach, selectedPaths, onSelect, refreshVe
     if (expanded && loaded) {
       window.electronAPI.listAttachedDirectory(dirPath)
         .then((items) => setChildren(items))
-        .catch((err) => console.error('[AttachedDirTree] 刷新失败:', err))
+        .catch((err) => {
+          console.error('[AttachedDirTree] 刷新失败:', err)
+          toast.error('刷新附加目录失败', { description: getErrorMessage(err) })
+        })
     }
   }, [refreshVersion]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -626,6 +648,7 @@ function AttachedDirTree({ dirPath, onDetach, selectedPaths, onSelect, refreshVe
         setLoaded(true)
       } catch (err) {
         console.error('[AttachedDirTree] 加载失败:', err)
+        toast.error('加载附加目录失败', { description: getErrorMessage(err) })
       }
     }
     setExpanded(!expanded)
@@ -712,7 +735,10 @@ function AttachedDirItem({ entry, depth, selectedPaths, onSelect, refreshVersion
     if (expanded && loaded && entry.isDirectory) {
       window.electronAPI.listAttachedDirectory(currentPath)
         .then((items) => setChildren(items))
-        .catch((err) => console.error('[AttachedDirItem] 刷新子目录失败:', err))
+        .catch((err) => {
+          console.error('[AttachedDirItem] 刷新子目录失败:', err)
+          toast.error('刷新附加目录失败', { description: getErrorMessage(err) })
+        })
     }
   }, [refreshVersion]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -725,6 +751,7 @@ function AttachedDirItem({ entry, depth, selectedPaths, onSelect, refreshVersion
         setLoaded(true)
       } catch (err) {
         console.error('[AttachedDirItem] 加载子目录失败:', err)
+        toast.error('加载附加目录失败', { description: getErrorMessage(err) })
       }
     }
     setExpanded(!expanded)
@@ -772,6 +799,7 @@ function AttachedDirItem({ entry, depth, selectedPaths, onSelect, refreshVersion
       setCurrentPath(newPath)
     } catch (err) {
       console.error('[AttachedDirItem] 重命名失败:', err)
+      toast.error('重命名失败', { description: getErrorMessage(err) })
     }
     setIsRenaming(false)
   }
@@ -793,6 +821,7 @@ function AttachedDirItem({ entry, depth, selectedPaths, onSelect, refreshVersion
       setCurrentPath(newPath)
     } catch (err) {
       console.error('[AttachedDirItem] 移动失败:', err)
+      toast.error('移动失败', { description: getErrorMessage(err) })
     }
   }
 

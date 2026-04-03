@@ -399,17 +399,19 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
 
   // 合并工作区文件目录、工作区级附加目录和会话级附加目录，供 @ 引用搜索
   const allAttachedDirs = React.useMemo(() => {
-    const dirs = [...attachedDirs]
-    // 添加工作区级附加目录
-    for (const d of wsAttachedDirs) {
-      if (!dirs.includes(d)) dirs.push(d)
+    const normalizePath = (path: string): string => path.replace(/\\/g, '/').replace(/\/+$/, '')
+    const seen = new Set<string>()
+    const merged: string[] = []
+
+    for (const path of [workspaceFilesPath, ...wsAttachedDirs, ...attachedDirs]) {
+      if (!path) continue
+      const normalized = normalizePath(path)
+      if (!normalized || seen.has(normalized)) continue
+      seen.add(normalized)
+      merged.push(path)
     }
-    // 添加工作区共享文件目录
-    if (workspaceFilesPath && !dirs.includes(workspaceFilesPath)) {
-      dirs.unshift(workspaceFilesPath)
-    }
-    return dirs
-  }, [attachedDirs, wsAttachedDirs, workspaceFilesPath])
+    return merged
+  }, [workspaceFilesPath, wsAttachedDirs, attachedDirs])
 
   // 监听消息刷新版本号
   const refreshMap = useAtomValue(agentMessageRefreshAtom)

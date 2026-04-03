@@ -33,9 +33,9 @@ export function createFileMentionSuggestion(
     items: async ({ query }): Promise<FileIndexEntry[]> => {
       const wsPath = workspacePathRef.current
       if (!wsPath) return []
+      const additionalPaths = attachedDirsRef?.current ?? []
 
       try {
-        const additionalPaths = attachedDirsRef?.current ?? []
         const result = await window.electronAPI.searchWorkspaceFiles(
           wsPath,
           query ?? '',
@@ -43,7 +43,14 @@ export function createFileMentionSuggestion(
           additionalPaths.length > 0 ? additionalPaths : undefined,
         )
         return result.entries
-      } catch {
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        console.warn('[FileMentionSuggestion] @ 文件搜索失败', {
+          workspacePath: wsPath,
+          query: query ?? '',
+          additionalPaths,
+          error: errorMessage,
+        })
         return []
       }
     },
