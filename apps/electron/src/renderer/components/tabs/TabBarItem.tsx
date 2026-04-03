@@ -54,10 +54,10 @@ export function TabBarItem({
       className={cn(
         'group relative flex items-center gap-1.5 px-3 h-[34px] min-w-[100px] max-w-[200px] shrink-0',
         'rounded-t-lg text-xs transition-colors select-none cursor-pointer',
-        'border-t border-l border-r border-transparent',
+        'border border-border/45 bg-background/30',
         isActive
-          ? 'bg-content-area text-foreground border-border/50 shadow-[0_1px_3px_rgba(0,0,0,0.08),0_2px_6px_rgba(0,0,0,0.04)]'
-          : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+          ? 'bg-content-area text-foreground border-border/70 shadow-[0_1px_3px_rgba(0,0,0,0.08),0_2px_6px_rgba(0,0,0,0.04)]'
+          : 'text-muted-foreground hover:text-foreground hover:bg-muted/50 hover:border-border/65',
       )}
       onClick={onActivate}
       onMouseDown={handleMouseDown}

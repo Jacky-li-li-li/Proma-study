@@ -238,7 +238,7 @@ export function TabBar(): React.ReactElement {
           type="button"
           variant="ghost"
           size="icon"
-          className="size-[34px] shrink-0 rounded-none text-muted-foreground hover:text-foreground titlebar-no-drag"
+          className="size-[34px] shrink-0 rounded-md border border-border/60 bg-background/65 text-foreground/65 hover:bg-background/90 hover:text-foreground hover:border-border/80 titlebar-no-drag"
           aria-label="打开侧面板"
           onClick={handleToggleAgentSidePanel}
         >

@@ -34,7 +34,7 @@ export function SessionHeaderControls({
   }, [mode, createAgent, createChat])
 
   const needTrafficLightOffset = sidebarCollapsed && !isFullscreen
-  const baseButtonClass = 'size-[26px] flex items-center justify-center rounded-md border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40'
+  const baseButtonClass = 'size-[34px] flex items-center justify-center rounded-md border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40'
   const sidebarToggleButtonClass = cn(
     baseButtonClass,
     'border-border/60 bg-background/65 text-foreground/65 hover:bg-background/90 hover:text-foreground hover:border-border/80'
