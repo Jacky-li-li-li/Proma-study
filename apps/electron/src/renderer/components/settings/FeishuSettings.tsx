@@ -171,6 +171,19 @@ function FeishuBindingCard({ binding, onUpdate, onRemove }: FeishuBindingCardPro
 
   const currentWorkspace = workspaces.find((w) => w.id === binding.workspaceId)
   const currentSession = sessions.find((s) => s.id === binding.sessionId)
+  const handleWorkspaceChange = React.useCallback((workspaceId: string) => {
+    const nextSessions = sessions.filter((s) => s.workspaceId === workspaceId)
+    if (nextSessions.length === 0) {
+      toast.error('目标工作区下没有可用会话，请先创建会话后再切换绑定。')
+      return
+    }
+
+    const updates: { workspaceId?: string; sessionId?: string } = { workspaceId }
+    if (!currentSession || currentSession.workspaceId !== workspaceId) {
+      updates.sessionId = nextSessions[0]!.id
+    }
+    onUpdate(binding.chatId, updates)
+  }, [sessions, currentSession, onUpdate, binding.chatId])
 
   return (
     <div className="px-4 py-3 space-y-3">
@@ -219,7 +232,7 @@ function FeishuBindingCard({ binding, onUpdate, onRemove }: FeishuBindingCardPro
         <span className="text-muted-foreground">工作区</span>
         <Select
           value={binding.workspaceId}
-          onValueChange={(value) => onUpdate(binding.chatId, { workspaceId: value })}
+          onValueChange={handleWorkspaceChange}
         >
           <SelectTrigger className="h-8 text-xs">
             <SelectValue placeholder="选择工作区">
@@ -245,6 +258,9 @@ function FeishuBindingCard({ binding, onUpdate, onRemove }: FeishuBindingCardPro
             </SelectValue>
           </SelectTrigger>
           <SelectContent>
+            {workspaceSessions.length === 0 && (
+              <SelectItem value="__no_session__" disabled>该工作区暂无会话</SelectItem>
+            )}
             {workspaceSessions.map((s) => (
               <SelectItem key={s.id} value={s.id}>
                 {s.title}
@@ -299,6 +315,8 @@ function FeishuBindingsTab(): React.ReactElement {
       if (result) {
         setBindings((prev) => prev.map((b) => b.chatId === chatId ? result : b))
         toast.success('绑定已更新')
+      } else {
+        toast.error('更新失败：会话与工作区不匹配，或该会话已被其他聊天绑定。')
       }
     } catch {
       toast.error('更新绑定失败')
@@ -482,33 +500,34 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
 
   return (
     <SettingsCard>
-      {/* 头部：名称 + 状态 + 展开/折叠 */}
-      <button
-        type="button"
-        className="w-full px-4 py-3 flex items-center justify-between hover:bg-muted/30 transition-colors"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <div className="flex items-center gap-3">
+      {/* 头部：独立展开触发区 + 独立操作区（避免 button 嵌套） */}
+      <div className="px-4 py-3 flex items-center gap-3">
+        <button
+          type="button"
+          className="min-w-0 flex-1 flex items-center gap-3 text-left hover:bg-muted/30 rounded-md px-2 py-1.5 -mx-2 -my-1.5 transition-colors"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+        >
           <span className={`w-2 h-2 rounded-full flex-shrink-0 ${statusConfig.color}`} />
-          <span className="font-medium text-sm">{bot.name || '未命名 Bot'}</span>
-          <span className="text-xs text-muted-foreground">{bot.appId ? bot.appId.slice(0, 12) + '...' : '未配置'}</span>
-        </div>
+          <span className="font-medium text-sm truncate">{bot.name || '未命名 Bot'}</span>
+          <span className="text-xs text-muted-foreground truncate">{bot.appId ? bot.appId.slice(0, 12) + '...' : '未配置'}</span>
+          <span className="text-xs text-muted-foreground ml-auto">{expanded ? '▾' : '▸'}</span>
+        </button>
         <div className="flex items-center gap-2">
           {isConnected ? (
-            <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); handleToggle() }}>
+            <Button size="sm" variant="outline" onClick={handleToggle}>
               <PowerOff size={14} className="mr-1" />
               停止
             </Button>
           ) : bot.appId ? (
-            <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); handleToggle() }}
+            <Button size="sm" variant="outline" onClick={handleToggle}
               disabled={state?.status === 'connecting'}>
               {state?.status === 'connecting' ? <Loader2 size={14} className="animate-spin mr-1" /> : <Power size={14} className="mr-1" />}
               启动
             </Button>
           ) : null}
-          <span className="text-xs text-muted-foreground">{expanded ? '▾' : '▸'}</span>
         </div>
-      </button>
+      </div>
 
       {/* 展开的配置表单 */}
       {expanded && (

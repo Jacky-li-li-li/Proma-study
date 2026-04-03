@@ -17,7 +17,7 @@ import type {
   DingTalkTestResult,
 } from '@proma/shared'
 import { DINGTALK_IPC_CHANNELS } from '@proma/shared'
-import { getDecryptedBotClientSecret } from './dingtalk-config'
+import { getDecryptedBotClientSecret, saveDingTalkBotConfig } from './dingtalk-config'
 import { BridgeCommandHandler } from './bridge-command-handler'
 
 // ===== 类型声明 =====
@@ -115,6 +115,23 @@ class DingTalkBridge {
         },
       },
       getDefaultWorkspaceId: () => this.botConfig.defaultWorkspaceId,
+      onWorkspaceSwitched: (workspaceId: string) => {
+        try {
+          saveDingTalkBotConfig({
+            id: this.botConfig.id,
+            name: this.botConfig.name,
+            enabled: this.botConfig.enabled,
+            clientId: this.botConfig.clientId,
+            clientSecret: '',
+            defaultWorkspaceId: workspaceId,
+            defaultChannelId: this.botConfig.defaultChannelId,
+            defaultModelId: this.botConfig.defaultModelId,
+          })
+          this.botConfig.defaultWorkspaceId = workspaceId
+        } catch (error) {
+          console.error(`[钉钉 Bridge/${this.botConfig.name}] 更新默认工作区失败:`, error)
+        }
+      },
     })
   }
 

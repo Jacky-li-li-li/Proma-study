@@ -17,7 +17,13 @@ import type {
   WeChatMessageItem,
 } from '@proma/shared'
 import { WECHAT_IPC_CHANNELS, WECHAT_ITEM_TYPE, WECHAT_MESSAGE_TYPE, WECHAT_MESSAGE_STATE } from '@proma/shared'
-import { getDecryptedCredentials, saveWeChatCredentials, clearWeChatCredentials } from './wechat-config'
+import {
+  getDecryptedCredentials,
+  saveWeChatCredentials,
+  clearWeChatCredentials,
+  getWeChatConfig,
+  updateWeChatDefaultWorkspaceId,
+} from './wechat-config'
 import { getWeChatSyncPath } from './config-paths'
 import { BridgeCommandHandler } from './bridge-command-handler'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
@@ -221,6 +227,10 @@ class WeChatBridge {
           await this.client.sendText(chatId, chunk, contextToken)
         }
       },
+    },
+    getDefaultWorkspaceId: () => getWeChatConfig().defaultWorkspaceId,
+    onWorkspaceSwitched: (workspaceId: string) => {
+      updateWeChatDefaultWorkspaceId(workspaceId)
     },
   })
 

@@ -306,33 +306,34 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
 
   return (
     <SettingsCard>
-      {/* 头部：名称 + 状态 + 展开/折叠 */}
-      <button
-        type="button"
-        className="w-full px-4 py-3 flex items-center justify-between hover:bg-muted/30 transition-colors"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <div className="flex items-center gap-3">
+      {/* 头部：独立展开触发区 + 独立操作区（避免 button 嵌套） */}
+      <div className="px-4 py-3 flex items-center gap-3">
+        <button
+          type="button"
+          className="min-w-0 flex-1 flex items-center gap-3 text-left hover:bg-muted/30 rounded-md px-2 py-1.5 -mx-2 -my-1.5 transition-colors"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+        >
           <span className={`w-2 h-2 rounded-full flex-shrink-0 ${statusConfig.color}`} />
-          <span className="font-medium text-sm">{bot.name || '未命名 Bot'}</span>
-          <span className="text-xs text-muted-foreground">{bot.clientId ? bot.clientId.slice(0, 12) + '...' : '未配置'}</span>
-        </div>
+          <span className="font-medium text-sm truncate">{bot.name || '未命名 Bot'}</span>
+          <span className="text-xs text-muted-foreground truncate">{bot.clientId ? bot.clientId.slice(0, 12) + '...' : '未配置'}</span>
+          <span className="text-xs text-muted-foreground ml-auto">{expanded ? '▾' : '▸'}</span>
+        </button>
         <div className="flex items-center gap-2">
           {isConnected ? (
-            <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); handleToggle() }}>
+            <Button size="sm" variant="outline" onClick={handleToggle}>
               <PowerOff size={14} className="mr-1" />
               停止
             </Button>
           ) : bot.clientId ? (
-            <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); handleToggle() }}
+            <Button size="sm" variant="outline" onClick={handleToggle}
               disabled={state?.status === 'connecting'}>
               {state?.status === 'connecting' ? <Loader2 size={14} className="animate-spin mr-1" /> : <Power size={14} className="mr-1" />}
               启动
             </Button>
           ) : null}
-          <span className="text-xs text-muted-foreground">{expanded ? '▾' : '▸'}</span>
         </div>
-      </button>
+      </div>
 
       {/* 展开的配置表单 */}
       {expanded && (

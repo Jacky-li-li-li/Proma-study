@@ -56,6 +56,8 @@ export function getWeChatConfig(): WeChatConfig {
 
 /** 保存微信凭证（接收明文 botToken，自动加密） */
 export function saveWeChatCredentials(creds: WeChatCredentials, defaultWorkspaceId?: string): WeChatConfig {
+  const existing = getWeChatConfig()
+  const nextDefaultWorkspaceId = defaultWorkspaceId ?? existing.defaultWorkspaceId
   const configPath = getWeChatConfigPath()
   const config: WeChatConfig = {
     enabled: true,
@@ -65,11 +67,23 @@ export function saveWeChatCredentials(creds: WeChatCredentials, defaultWorkspace
       baseUrl: creds.baseUrl,
       ilinkUserId: creds.ilinkUserId,
     },
-    defaultWorkspaceId,
+    defaultWorkspaceId: nextDefaultWorkspaceId,
   }
   writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8')
   console.log('[微信配置] 凭证已保存')
   return config
+}
+
+/** 更新微信默认工作区 */
+export function updateWeChatDefaultWorkspaceId(defaultWorkspaceId?: string): WeChatConfig {
+  const configPath = getWeChatConfigPath()
+  const existing = getWeChatConfig()
+  const updated: WeChatConfig = {
+    ...existing,
+    defaultWorkspaceId,
+  }
+  writeFileSync(configPath, JSON.stringify(updated, null, 2), 'utf-8')
+  return updated
 }
 
 /** 获取解密后的凭证 */
@@ -85,7 +99,12 @@ export function getDecryptedCredentials(): WeChatCredentials | null {
 /** 清除微信凭证（登出） */
 export function clearWeChatCredentials(): void {
   const configPath = getWeChatConfigPath()
-  const config: WeChatConfig = { enabled: false, credentials: null }
+  const existing = getWeChatConfig()
+  const config: WeChatConfig = {
+    enabled: false,
+    credentials: null,
+    defaultWorkspaceId: existing.defaultWorkspaceId,
+  }
   writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8')
   console.log('[微信配置] 凭证已清除')
 }

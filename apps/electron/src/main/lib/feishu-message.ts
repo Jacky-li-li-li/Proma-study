@@ -20,6 +20,15 @@ export interface FormattedAgentResult {
   duration: number
 }
 
+/** Thinking 完成态默认折叠行数 */
+export const FEISHU_THINKING_COLLAPSE_LINES = 6
+
+interface ThinkingCardInput {
+  workspaceName: string
+  thinkingText: string
+  durationSeconds: number
+}
+
 /**
  * 构建 Agent 回复的飞书交互卡片
  */
@@ -83,15 +92,76 @@ export function buildNotificationCard(
 /**
  * 构建错误卡片
  */
-export function buildErrorCard(errorMessage: string): Record<string, unknown> {
+export function buildErrorCard(workspaceName: string, errorMarkdown: string): Record<string, unknown> {
   return {
-    config: { wide_screen_mode: true },
+    config: { wide_screen_mode: true, update_multi: true },
     header: {
-      title: { tag: 'plain_text', content: 'Proma 错误' },
+      title: { tag: 'plain_text', content: `${workspaceName || '默认工作区'} 错误` },
       template: 'red',
     },
     elements: [
-      { tag: 'markdown', content: errorMessage },
+      { tag: 'markdown', content: errorMarkdown },
+    ],
+  }
+}
+
+/**
+ * 构建 Thinking 进行中卡片（蓝色）
+ */
+export function buildThinkingInProgressCard(input: ThinkingCardInput): Record<string, unknown> {
+  const thinkingContent = truncateForFeishu(input.thinkingText || '正在整理思路...')
+
+  return {
+    config: { wide_screen_mode: true, update_multi: true },
+    header: {
+      title: { tag: 'plain_text', content: '思考中' },
+      subtitle: { tag: 'plain_text', content: `工作区：${input.workspaceName}` },
+      template: 'blue',
+    },
+    elements: [
+      {
+        tag: 'div',
+        text: {
+          tag: 'plain_text',
+          content: thinkingContent,
+        },
+      },
+      { tag: 'hr' },
+      {
+        tag: 'note',
+        elements: [{ tag: 'plain_text', content: `耗时：${formatDurationSeconds(input.durationSeconds)}` }],
+      },
+    ],
+  }
+}
+
+/**
+ * 构建 Thinking 完成卡片（绿色，默认折叠）
+ */
+export function buildThinkingCompletedCard(input: ThinkingCardInput): Record<string, unknown> {
+  const thinkingContent = truncateForFeishu(input.thinkingText || '无可展示的思考内容。')
+
+  return {
+    config: { wide_screen_mode: true, update_multi: true },
+    header: {
+      title: { tag: 'plain_text', content: '思考完成' },
+      subtitle: { tag: 'plain_text', content: `工作区：${input.workspaceName}` },
+      template: 'green',
+    },
+    elements: [
+      {
+        tag: 'div',
+        text: {
+          tag: 'plain_text',
+          content: thinkingContent,
+          lines: FEISHU_THINKING_COLLAPSE_LINES,
+        },
+      },
+      { tag: 'hr' },
+      {
+        tag: 'note',
+        elements: [{ tag: 'plain_text', content: `耗时：${formatDurationSeconds(input.durationSeconds)}` }],
+      },
     ],
   }
 }
@@ -294,6 +364,11 @@ function formatToolSummaryLine(summaries: ToolSummary[], durationSeconds: number
   }
 
   return parts.join(' | ')
+}
+
+function formatDurationSeconds(durationSeconds: number): string {
+  const safeSeconds = Number.isFinite(durationSeconds) ? Math.max(0, Math.round(durationSeconds)) : 0
+  return `${safeSeconds}s`
 }
 
 /**

@@ -12,9 +12,10 @@ import type { AgentStreamPayload } from '@proma/shared'
 import { AGENT_IPC_CHANNELS } from '@proma/shared'
 import { createAgentSession, listAgentSessions, getAgentSessionMeta } from './agent-session-manager'
 import { listAgentWorkspaces, getAgentWorkspace, getWorkspaceCapabilities } from './agent-workspace-manager'
-import { runAgentHeadless, agentEventBus, stopAgent } from './agent-service'
+import { runAgentHeadless, agentEventBus, stopAgent, isAgentSessionActive } from './agent-service'
 import { getSettings } from './settings-service'
 import { getAgentWorkspacePath } from './config-paths'
+import { shouldRejectIncomingMessage } from './im-bridge-rules'
 import { readdirSync } from 'node:fs'
 
 // ===== 接口定义 =====
@@ -518,6 +519,11 @@ export class BridgeCommandHandler {
 
     if (binding.mode !== 'agent') {
       await this.send(chatId, 'Chat 模式暂未实现，请使用 /agent 切换到 Agent 模式。', contextData)
+      return
+    }
+
+    if (shouldRejectIncomingMessage(isAgentSessionActive(binding.sessionId), this.sessionBuffers.has(binding.sessionId))) {
+      await this.send(chatId, '⏳ 上一条消息仍在处理中，请稍候再试。', contextData)
       return
     }
 
