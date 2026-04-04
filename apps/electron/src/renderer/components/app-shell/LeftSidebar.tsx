@@ -876,7 +876,6 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
   // ===== 展开状态：完整侧边栏 =====
   return (
     <div
-      data-left-sidebar-root
       className="h-full flex flex-col bg-background/95 backdrop-blur-xl rounded-2xl shadow-xl transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden"
       style={{ width: expandedWidth, minWidth: 180, flexShrink: 1 }}
     >
@@ -1257,7 +1256,7 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
           onClick={() => setSettingsOpen(true)}
           className="w-full flex items-center gap-3 px-3 py-2 rounded-[10px] transition-colors titlebar-no-drag text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground"
         >
-          <span data-sidebar-avatar-anchor className="shrink-0">
+          <span className="shrink-0">
             <UserAvatar avatar={userProfile.avatar} size={28} />
           </span>
           <span className="flex-1 text-sm truncate text-left">{userProfile.userName}</span>
