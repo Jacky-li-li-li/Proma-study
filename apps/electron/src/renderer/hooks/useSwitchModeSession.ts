@@ -69,59 +69,72 @@ export function useSwitchModeSession(): SwitchModeSessionActions {
   const { createChat, createAgent } = useCreateSession()
 
   const switchToMode = React.useCallback(async (targetMode: AppMode): Promise<void> => {
-    store.set(appModeAtom, targetMode)
-    store.set(activeViewAtom, 'conversations')
-
     if (targetMode === 'chat') {
+      let conversations: ConversationMeta[]
       try {
-        const conversations = await window.electronAPI.listConversations()
-        store.set(conversationsAtom, conversations)
-        const draftSessionIds = store.get(draftSessionIdsAtom)
-        const visibleConversations = conversations.filter(
-          (conversation) => !conversation.archived && !draftSessionIds.has(conversation.id),
-        )
-        const preferredConversationId =
-          store.get(currentConversationIdAtom) ?? store.get(lastOpenedConversationIdAtom)
-        const preferredConversation = preferredConversationId
-          ? visibleConversations.find((conversation) => conversation.id === preferredConversationId) ?? null
-          : null
-        const targetConversation = preferredConversation ?? visibleConversations[0] ?? null
-        if (targetConversation) {
-          activateChatSession(store, targetConversation)
-          return
-        }
+        conversations = await window.electronAPI.listConversations()
       } catch (error) {
         console.error('[模式切换] 加载 Chat 对话列表失败:', error)
+        const createdId = await createChat({ draft: true })
+        if (createdId) scheduleScrollToLatest(createdId)
+        return
       }
 
-      const createdId = await createChat({ draft: true })
+      const draftSessionIds = store.get(draftSessionIdsAtom)
+      const visibleConversations = conversations.filter(
+        (conversation) => !conversation.archived && !draftSessionIds.has(conversation.id),
+      )
+      const preferredConversationId =
+        store.get(currentConversationIdAtom) ?? store.get(lastOpenedConversationIdAtom)
+      const preferredConversation = preferredConversationId
+        ? visibleConversations.find((conversation) => conversation.id === preferredConversationId) ?? null
+        : null
+      const targetConversation = preferredConversation ?? visibleConversations[0] ?? null
+
+      store.set(conversationsAtom, conversations)
+      store.set(appModeAtom, 'chat')
+      store.set(activeViewAtom, 'conversations')
+
+      if (targetConversation) {
+        activateChatSession(store, targetConversation)
+      } else {
+        const createdId = await createChat({ draft: true })
+        if (createdId) scheduleScrollToLatest(createdId)
+      }
+      return
+    }
+
+    let sessions: AgentSessionMeta[]
+    try {
+      sessions = await window.electronAPI.listAgentSessions()
+    } catch (error) {
+      console.error('[模式切换] 加载 Agent 会话列表失败:', error)
+      const createdId = await createAgent({ draft: true })
       if (createdId) scheduleScrollToLatest(createdId)
       return
     }
 
-    try {
-      const sessions = await window.electronAPI.listAgentSessions()
-      store.set(agentSessionsAtom, sessions)
-      const draftSessionIds = store.get(draftSessionIdsAtom)
-      const visibleSessions = sessions.filter(
-        (session) => !session.archived && !draftSessionIds.has(session.id),
-      )
-      const preferredSessionId =
-        store.get(currentAgentSessionIdAtom) ?? store.get(lastOpenedAgentSessionIdAtom)
-      const preferredSession = preferredSessionId
-        ? visibleSessions.find((session) => session.id === preferredSessionId) ?? null
-        : null
-      const targetSession = preferredSession ?? visibleSessions[0] ?? null
-      if (targetSession) {
-        activateAgentSession(store, targetSession)
-        return
-      }
-    } catch (error) {
-      console.error('[模式切换] 加载 Agent 会话列表失败:', error)
-    }
+    const draftSessionIds = store.get(draftSessionIdsAtom)
+    const visibleSessions = sessions.filter(
+      (session) => !session.archived && !draftSessionIds.has(session.id),
+    )
+    const preferredSessionId =
+      store.get(currentAgentSessionIdAtom) ?? store.get(lastOpenedAgentSessionIdAtom)
+    const preferredSession = preferredSessionId
+      ? visibleSessions.find((session) => session.id === preferredSessionId) ?? null
+      : null
+    const targetSession = preferredSession ?? visibleSessions[0] ?? null
 
-    const createdId = await createAgent({ draft: true })
-    if (createdId) scheduleScrollToLatest(createdId)
+    store.set(agentSessionsAtom, sessions)
+    store.set(appModeAtom, 'agent')
+    store.set(activeViewAtom, 'conversations')
+
+    if (targetSession) {
+      activateAgentSession(store, targetSession)
+    } else {
+      const createdId = await createAgent({ draft: true })
+      if (createdId) scheduleScrollToLatest(createdId)
+    }
   }, [store, createChat, createAgent])
 
   return { switchToMode }
