@@ -16,6 +16,7 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
 } from '@/components/ui/dialog'
 import {
   conversationsAtom,
@@ -251,6 +252,7 @@ export function ModelSelector({
         <DialogContent className="p-0 gap-0 max-w-lg">
           <DialogHeader className="sr-only">
             <DialogTitle>选择模型</DialogTitle>
+            <DialogDescription>通过搜索和浏览来选择 AI 模型</DialogDescription>
           </DialogHeader>
 
           {/* 搜索栏 */}

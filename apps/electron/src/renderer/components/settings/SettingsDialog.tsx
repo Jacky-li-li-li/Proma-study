@@ -25,6 +25,9 @@ export function SettingsDialog(): React.ReactElement {
           className="fixed left-[50%] top-[50%] z-[100] translate-x-[-50%] translate-y-[-50%] w-[85vw] max-w-[992px] h-[85vh] max-h-[752px] bg-dialog text-dialog-foreground shadow-2xl rounded-xl overflow-hidden titlebar-no-drag transition-all duration-100 data-[state=open]:opacity-100 data-[state=open]:scale-100 data-[state=closed]:opacity-0 data-[state=closed]:scale-[0.98]"
         >
           <DialogPrimitive.Title className="sr-only">设置</DialogPrimitive.Title>
+          <DialogPrimitive.Description className="sr-only">
+            应用设置面板
+          </DialogPrimitive.Description>
           <SettingsPanel onClose={() => setOpen(false)} />
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
