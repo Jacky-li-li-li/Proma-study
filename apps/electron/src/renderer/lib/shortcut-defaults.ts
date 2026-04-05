@@ -97,6 +97,14 @@ export const DEFAULT_SHORTCUTS: ShortcutDefinition[] = [
     defaultWin: 'Ctrl+L',
     category: 'navigation',
   },
+  {
+    id: 'cycle-agent-mode',
+    name: '切换 Agent 权限模式',
+    description: '在 Agent 模式下循环切换权限模式（自动编辑→完全自动→计划模式）',
+    defaultMac: 'Shift+Tab',
+    defaultWin: 'Shift+Tab',
+    category: 'app',
+  },
 
   // 编辑级
   {

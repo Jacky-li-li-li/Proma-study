@@ -167,6 +167,14 @@ export function GlobalShortcuts(): null {
     }, []),
   )
 
+  // Shift+Tab → 切换 Agent 权限模式（通过 CustomEvent 分发到 PermissionModeSelector）
+  useShortcut(
+    'cycle-agent-mode',
+    useCallback(() => {
+      window.dispatchEvent(new CustomEvent('proma:cycle-agent-mode'))
+    }, []),
+  )
+
   // ===== 快速任务窗口 → 创建会话并自动发送 =====
 
   const store = useStore()

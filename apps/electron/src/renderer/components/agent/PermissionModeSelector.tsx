@@ -13,6 +13,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { agentPermissionModeMapAtom, agentDefaultPermissionModeAtom, currentAgentWorkspaceIdAtom, agentWorkspacesAtom } from '@/atoms/agent-atoms'
 import type { PromaPermissionMode } from '@proma/shared'
 import { PROMA_PERMISSION_MODE_ORDER } from '@proma/shared'
+import { cn } from '@/lib/utils'
 
 /** 模式配置 */
 const MODE_CONFIG: Record<PromaPermissionMode, {
@@ -124,8 +125,20 @@ export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProp
     }
   }, [mode, sessionId, workspaceSlug, setModeMap, setDefaultMode])
 
+  // 监听快捷键事件：Shift+Tab 切换模式
+  const handleCycleModeShortcut = React.useCallback(() => {
+    void cycleMode()
+    requestAnimationFrame(() => document.querySelector<HTMLElement>('.ProseMirror')?.focus())
+  }, [cycleMode])
+
+  React.useEffect(() => {
+    window.addEventListener('proma:cycle-agent-mode', handleCycleModeShortcut)
+    return () => window.removeEventListener('proma:cycle-agent-mode', handleCycleModeShortcut)
+  }, [handleCycleModeShortcut])
+
   const config = MODE_CONFIG[mode]
   const Icon = config.icon
+  const isDangerMode = mode === 'bypassPermissions'
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -134,9 +147,12 @@ export function PermissionModeSelector({ sessionId }: PermissionModeSelectorProp
           <button
             type="button"
             onClick={() => { cycleMode(); requestAnimationFrame(() => document.querySelector<HTMLElement>('.ProseMirror')?.focus()) }}
-            className="flex items-center gap-1 px-1.5 py-1 rounded text-xs font-medium transition-colors text-muted-foreground hover:text-foreground"
+            className={cn(
+              'flex items-center gap-1 px-1.5 py-1 rounded text-xs font-medium transition-colors',
+              isDangerMode ? 'text-destructive hover:text-destructive' : 'text-muted-foreground hover:text-foreground'
+            )}
           >
-            <Icon className="size-3.5" />
+            <Icon className={cn('size-3.5', isDangerMode && 'fill-destructive')} />
             <span className="hidden sm:inline">{config.label}</span>
           </button>
         </TooltipTrigger>
