@@ -273,6 +273,8 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
           <div className="flex items-center justify-between px-2 py-1 h-[48px] gap-4">
             {/* 左侧工具按钮 */}
             <div className="flex items-center gap-1.5 flex-1 min-w-0">
+              <ModelSelector />
+
               {/* 附件按钮 */}
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -290,8 +292,6 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
                   <p>添加附件</p>
                 </TooltipContent>
               </Tooltip>
-
-              <ModelSelector />
 
               {/* 思考模式切换 */}
               <Tooltip>

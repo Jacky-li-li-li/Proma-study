@@ -26,7 +26,6 @@ import { AskUserBanner } from './AskUserBanner'
 import { ExitPlanModeBanner } from './ExitPlanModeBanner'
 import { PlanModeDashedBorder } from './PlanModeDashedBorder'
 import { ModelSelector } from '@/components/chat/ModelSelector'
-import { AgentPromptSelector } from './AgentPromptSelector'
 import { AttachmentPreviewItem } from '@/components/chat/AttachmentPreviewItem'
 import { RichTextInput } from '@/components/ai-elements/rich-text-input'
 import { Button } from '@/components/ui/button'
@@ -1318,7 +1317,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             {/* Footer 工具栏 */}
             <div className="flex items-center justify-between px-2 py-1 h-[48px] gap-4">
               <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                <AgentPromptSelector />
                 <ModelSelector
                   filterChannelIds={agentChannelIds}
                   externalSelectedModel={externalSelectedModel}
