@@ -12,7 +12,7 @@
 import * as React from 'react'
 import { useAtomValue, useSetAtom, useStore } from 'jotai'
 import { Loader2 } from 'lucide-react'
-import { appModeAtom } from '@/atoms/app-mode'
+import { appModeAtom, lastOpenedConversationIdAtom, lastOpenedAgentSessionIdAtom } from '@/atoms/app-mode'
 import { conversationsAtom } from '@/atoms/chat-atoms'
 import { agentSessionsAtom, currentAgentWorkspaceIdAtom, agentSettingsReadyAtom } from '@/atoms/agent-atoms'
 import { tabsAtom, splitLayoutAtom, openTab } from '@/atoms/tab-atoms'
@@ -52,6 +52,8 @@ export function WelcomeView(): React.ReactElement {
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const agentSettingsReady = useAtomValue(agentSettingsReadyAtom)
   const draftSessionIds = useAtomValue(draftSessionIdsAtom)
+  const lastOpenedConversationId = useAtomValue(lastOpenedConversationIdAtom)
+  const lastOpenedAgentSessionId = useAtomValue(lastOpenedAgentSessionIdAtom)
   const setConversations = useSetAtom(conversationsAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
   const setTabs = useSetAtom(tabsAtom)
@@ -72,12 +74,18 @@ export function WelcomeView(): React.ReactElement {
         if (store.get(tabsAtom).length > 0) return
 
         if (mode === 'chat') {
-          // 先实时拉取会话列表，避免初始化竞态把“尚未加载”误判为“没有会话”。
+          // 先实时拉取会话列表，避免初始化竞态把”尚未加载”误判为”没有会话”。
           const latestConversations = await window.electronAPI.listConversations()
           if (cancelled) return
           setConversations(latestConversations)
 
-          const existing = latestConversations.find((c) => !c.archived && !draftSessionIds.has(c.id))
+          // 优先恢复上次打开的会话，其次取第一个可用会话
+          const preferred = lastOpenedConversationId
+            ? latestConversations.find(
+                (c) => c.id === lastOpenedConversationId && !c.archived && !draftSessionIds.has(c.id),
+              )
+            : null
+          const existing = preferred ?? latestConversations.find((c) => !c.archived && !draftSessionIds.has(c.id))
           if (existing) {
             if (store.get(tabsAtom).length > 0) return
             const tabs = store.get(tabsAtom)
@@ -102,7 +110,17 @@ export function WelcomeView(): React.ReactElement {
         if (cancelled) return
         setAgentSessions(latestSessions)
 
-        const existing = latestSessions.find(
+        // 优先恢复上次打开的会话，其次取第一个可用会话
+        const preferred = lastOpenedAgentSessionId
+          ? latestSessions.find(
+              (s) =>
+                s.id === lastOpenedAgentSessionId &&
+                !s.archived &&
+                s.workspaceId === currentWorkspaceId &&
+                !draftSessionIds.has(s.id),
+            )
+          : null
+        const existing = preferred ?? latestSessions.find(
           (s) => !s.archived && s.workspaceId === currentWorkspaceId && !draftSessionIds.has(s.id),
         )
         if (existing) {
@@ -139,6 +157,8 @@ export function WelcomeView(): React.ReactElement {
     createChat,
     createAgent,
     draftSessionIds,
+    lastOpenedConversationId,
+    lastOpenedAgentSessionId,
     setConversations,
     setAgentSessions,
     setTabs,

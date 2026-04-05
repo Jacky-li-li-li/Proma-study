@@ -584,6 +584,8 @@ export interface ElectronAPI {
   setDefaultPrompt: (id: string | null) => Promise<void>
   /** 更新 Agent 附加提示词 */
   updateAgentPromptAppend: (content: string) => Promise<void>
+  /** 设置 Agent 当前选中的提示词 ID */
+  updateAgentPromptId: (id: string) => Promise<void>
 
   // ===== 版本检测相关（仅检测，不自动下载/安装） =====
 
@@ -1374,6 +1376,10 @@ const electronAPI: ElectronAPI = {
 
   updateAgentPromptAppend: (content: string) => {
     return ipcRenderer.invoke(SYSTEM_PROMPT_IPC_CHANNELS.UPDATE_AGENT_PROMPT_APPEND, content)
+  },
+
+  updateAgentPromptId: (id: string) => {
+    return ipcRenderer.invoke(SYSTEM_PROMPT_IPC_CHANNELS.UPDATE_AGENT_PROMPT_ID, id)
   },
 
   // 自动更新（仅版本检测，不自动下载/安装）

@@ -38,6 +38,7 @@ function activateChatSession(
   store.set(tabsAtom, result.tabs)
   store.set(splitLayoutAtom, result.layout)
   store.set(currentConversationIdAtom, conversation.id)
+  store.set(lastOpenedConversationIdAtom, conversation.id)
   scheduleScrollToLatest(conversation.id, 'smooth')
 }
 
@@ -55,6 +56,7 @@ function activateAgentSession(
   store.set(tabsAtom, result.tabs)
   store.set(splitLayoutAtom, result.layout)
   store.set(currentAgentSessionIdAtom, session.id)
+  store.set(lastOpenedAgentSessionIdAtom, session.id)
   scheduleScrollToLatest(session.id, 'smooth')
 }
 

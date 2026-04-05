@@ -195,6 +195,7 @@ import {
   updateAppendSetting,
   setDefaultPrompt,
   updateAgentPromptAppend,
+  updateAgentPromptId,
 } from './lib/system-prompt-manager'
 import {
   getLatestRelease,
@@ -1909,6 +1910,14 @@ export function registerIpcHandlers(): void {
     SYSTEM_PROMPT_IPC_CHANNELS.UPDATE_AGENT_PROMPT_APPEND,
     async (_, content: string): Promise<void> => {
       return updateAgentPromptAppend(content)
+    }
+  )
+
+  // 设置 Agent 当前选中的提示词 ID
+  ipcMain.handle(
+    SYSTEM_PROMPT_IPC_CHANNELS.UPDATE_AGENT_PROMPT_ID,
+    async (_, id: string): Promise<void> => {
+      return updateAgentPromptId(id)
     }
   )
 

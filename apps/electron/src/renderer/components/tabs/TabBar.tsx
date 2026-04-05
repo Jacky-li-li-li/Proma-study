@@ -280,7 +280,7 @@ export function TabBar(): React.ReactElement {
 
       const rootRect = latestRoot.getBoundingClientRect()
       const tabsRect = latestTabs.getBoundingClientRect()
-      const offset = Math.max(0, Math.round(tabsRect.left - rootRect.left))
+      const offset = Math.max(0, Math.round(tabsRect.left - rootRect.left)) + 1
       hostEl.style.setProperty('--session-content-left-offset', `${offset}px`)
     }
 

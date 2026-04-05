@@ -19,7 +19,7 @@ import { SearchDialog } from './SearchDialog'
 import { useCreateSession } from '@/hooks/useCreateSession'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { activeViewAtom } from '@/atoms/active-view'
-import { appModeAtom } from '@/atoms/app-mode'
+import { appModeAtom, lastOpenedConversationIdAtom, lastOpenedAgentSessionIdAtom } from '@/atoms/app-mode'
 import { settingsTabAtom, settingsOpenAtom } from '@/atoms/settings-tab'
 import {
   conversationsAtom,
@@ -159,6 +159,8 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
   const [conversations, setConversations] = useAtom(conversationsAtom)
   const [currentConversationId, setCurrentConversationId] = useAtom(currentConversationIdAtom)
   const draftSessionIds = useAtomValue(draftSessionIdsAtom)
+  const setLastOpenedConversationId = useSetAtom(lastOpenedConversationIdAtom)
+  const setLastOpenedAgentSessionId = useSetAtom(lastOpenedAgentSessionIdAtom)
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const [hoveredId, setHoveredId] = React.useState<string | null>(null)
   /** 待删除对话/会话 ID 列表，非空时显示确认弹窗 */
@@ -437,6 +439,9 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
       return
     }
 
+    // 记录上次打开的会话 ID
+    setLastOpenedConversationId(id)
+
     const result = openTab(tabs, layout, { type: 'chat', sessionId: id, title })
     setTabs(result.tabs)
     setLayout(result.layout)
@@ -641,6 +646,9 @@ export function LeftSidebar({ width }: LeftSidebarProps): React.ReactElement {
       })
       return
     }
+
+    // 记录上次打开的会话 ID
+    setLastOpenedAgentSessionId(id)
 
     const result = openTab(tabs, layout, { type: 'agent', sessionId: id, title })
     setTabs(result.tabs)

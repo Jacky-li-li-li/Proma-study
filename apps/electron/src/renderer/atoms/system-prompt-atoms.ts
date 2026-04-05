@@ -12,6 +12,7 @@ import { atomWithStorage } from 'jotai/utils'
 import {
   BUILTIN_DEFAULT_ID,
   BUILTIN_DEFAULT_PROMPT,
+  BUILTIN_AGENT_ID,
 } from '@proma/shared'
 import type { SystemPromptConfig, SystemPrompt } from '@proma/shared'
 import { userProfileAtom } from './user-profile'
@@ -24,6 +25,7 @@ export const promptConfigAtom = atom<SystemPromptConfig>({
   prompts: [BUILTIN_DEFAULT_PROMPT],
   defaultPromptId: BUILTIN_DEFAULT_ID,
   appendDateTimeAndUserName: true,
+  agentPromptId: BUILTIN_AGENT_ID,
   agentPromptAppend: '',
 })
 
@@ -107,3 +109,21 @@ export function resolveSystemMessage(
 
   return message
 }
+
+// ===== Agent 提示词 =====
+
+/** Agent 全局默认提示词 ID（持久化到 localStorage） */
+export const agentPromptIdAtom = atomWithStorage<string>(
+  'proma-agent-prompt-id',
+  BUILTIN_AGENT_ID
+)
+
+/** 每个 Agent 会话选中的提示词 ID（Map 模式，与 ModelSelector 一致） */
+export const agentSessionPromptIdAtom = atom<Map<string, string>>(new Map())
+
+/** Agent 当前选中的提示词对象（派生只读） */
+export const agentSelectedPromptAtom = atom<SystemPrompt | undefined>((get) => {
+  const config = get(promptConfigAtom)
+  const selectedId = get(agentPromptIdAtom)
+  return config.prompts.find((p) => p.id === selectedId)
+})
