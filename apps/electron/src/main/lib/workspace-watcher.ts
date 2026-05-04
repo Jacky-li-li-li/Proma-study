@@ -52,6 +52,11 @@ export function startWorkspaceWatcher(win: BrowserWindow): void {
       if (!filename || win.isDestroyed()) return
 
       // filename 格式: {slug}/mcp.json 或 {slug}/skills/xxx/SKILL.md 或 {slug}/{sessionId}/file.txt
+      // config.json 是工作区配置文件（权限模式等），变更不应触发文件浏览器刷新
+      if (filename === 'config.json' || filename.endsWith('/config.json') || filename.endsWith('\\config.json')) {
+        return
+      }
+
       const isCapabilitiesChange =
         filename.endsWith('/mcp.json') ||
         filename.endsWith('\\mcp.json') ||
