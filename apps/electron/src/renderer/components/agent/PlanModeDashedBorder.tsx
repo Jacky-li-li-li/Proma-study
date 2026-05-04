@@ -13,7 +13,7 @@ const STROKE_WIDTH = 2   // 线宽
 const BORDER_RADIUS = 17 // 圆角半径，与输入框 rounded-[17px] 一致
 const OFFSET = 2         // 向外偏移，避免遮盖原有 border
 
-export function PlanModeDashedBorder({ visible }: { visible: boolean }): React.ReactElement {
+export function PlanModeDashedBorder(): React.ReactElement {
   const containerRef = React.useRef<HTMLDivElement>(null)
   const [size, setSize] = React.useState({ w: 0, h: 0 })
 
@@ -40,7 +40,6 @@ export function PlanModeDashedBorder({ visible }: { visible: boolean }): React.R
       style={{
         inset: -OFFSET,
         zIndex: 10,
-        opacity: visible ? 1 : 0,
       }}
     >
       {size.w > 0 && size.h > 0 && (
