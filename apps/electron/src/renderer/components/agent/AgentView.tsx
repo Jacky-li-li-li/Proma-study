@@ -1379,7 +1379,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
           >
-            {(isPlanMode || isPermissionPlanMode) && !isDragOver && <PlanModeDashedBorder />}
+            <PlanModeDashedBorder visible={isPlanMode || isPermissionPlanMode} />
             {/* 无 Agent 渠道或无可用模型提示 */}
             {(!agentChannelId || !hasAvailableModel) && (
               <div className="flex items-center gap-2 px-4 py-2 text-sm text-amber-600 dark:text-amber-400">

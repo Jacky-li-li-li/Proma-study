@@ -46,7 +46,7 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
 
         {/* 右侧边栏：Agent 文件面板，带圆角和内边距 */}
         {showRightPanel && (
-          <div className={cn('relative z-[60] transition-[padding] duration-300 ease-in-out', isPanelOpen ? 'p-2 pl-0' : 'p-0')}>
+          <div className={cn('relative z-[60]', isPanelOpen ? 'p-2 pl-0' : 'p-0')}>
             <RightSidePanel />
           </div>
         )}
